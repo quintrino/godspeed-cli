@@ -6,7 +6,7 @@ class GodspeedCli < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/quintrino/godspeed-cli/releases/download/v0.1.0/godspeed-cli-v0.1.0-aarch64-apple-darwin.tar.gz"
-      sha256 "ad187497090a751ce578b6b809255178c60510b18297a421c3398e012cc76df0"
+      sha256 "7992e71436f4a3267b810b8cdc2175bdc573d23d7ab362c5d12de674671f386f"
     else
       url "https://github.com/quintrino/godspeed-cli/releases/download/v0.1.0/godspeed-cli-v0.1.0-x86_64-apple-darwin.tar.gz"
       sha256 "fe3f6c7ff5650178de3d8b6605d2168c572885f7bd7367fe80abd490215c5e71"
