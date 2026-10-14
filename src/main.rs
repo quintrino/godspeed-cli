@@ -238,7 +238,7 @@ fn add_to_cache(task_str: &str) -> io::Result<()> {
     let mut cache_content = fs::read_to_string(&cache_path).unwrap_or_default();
     cache_content.push_str(task_str);
     cache_content.push('\n');
-    cache_content.push_str("---\n");
+    cache_content.push_str("-*-*-*-\n");
     fs::write(&cache_path, cache_content)?;
     Ok(())
 }
@@ -247,7 +247,7 @@ fn get_cached_tasks() -> Vec<String> {
     let cache_path = get_cache_path();
     if let Ok(content) = fs::read_to_string(&cache_path) {
         content
-            .split("---\n")
+            .split("-*-*-*-\n")
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.trim().to_string())
             .collect()
@@ -260,14 +260,14 @@ fn remove_from_cache(task_str: &str) -> io::Result<()> {
     let cache_path = get_cache_path();
     let content = fs::read_to_string(&cache_path).unwrap_or_default();
     let remaining: Vec<&str> = content
-        .split("---\n")
+        .split("-*-*-*-\n")
         .filter(|s| !s.trim().is_empty() && s.trim() != task_str)
         .collect();
 
     let new_content = if remaining.is_empty() {
         String::new()
     } else {
-        remaining.join("---\n") + "\n---\n"
+        remaining.join("-*-*-*-\n") + "\n-*-*-*-\n"
     };
 
     fs::write(&cache_path, new_content)?;
