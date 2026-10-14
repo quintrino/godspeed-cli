@@ -337,11 +337,11 @@ fn main() {
         return;
     }
 
-    let api_key = match env::var("GODSPEED_API") {
+    let api_key = match env::var("GODSPEED_TOKEN") {
         Ok(key) => key,
         Err(_) => {
-            send_notification("GODSPEED_API environment variable not set");
-            eprintln!("Error: GODSPEED_API environment variable not set");
+            send_notification("GODSPEED_TOKEN environment variable not set");
+            eprintln!("Error: GODSPEED_TOKEN environment variable not set");
             return;
         }
     };

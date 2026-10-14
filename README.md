@@ -6,7 +6,7 @@ A lightweight command-line utility for quickly creating tasks in [Godspeed App](
 
 1. Set your API key:
 ```bash
-export GODSPEED_API="your-api-key-here"
+export GODSPEED_TOKEN="your-api-key-here"
 ```
 
 Add this to your `.zshrc` or `config.fish` to make it permanent.
@@ -15,8 +15,8 @@ Install via homebrew
 ```
 brew install quintrino/godspeed-cli/godspeed-cli
 ````
-  
-or 
+
+or
 
 
 2. Build the project:
@@ -194,10 +194,10 @@ godspeed-cli "Task @WORK"
 
 ## Troubleshooting
 
-### "GODSPEED_API environment variable not set"
+### "GODSPEED_TOKEN environment variable not set"
 Make sure you've exported your API key:
 ```bash
-export GODSPEED_API="your-key"
+export GODSPEED_TOKEN="your-key"
 ```
 
 ### List not found
