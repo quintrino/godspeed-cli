@@ -13,7 +13,7 @@ Add this to your `.zshrc` or `config.fish` to make it permanent.
 
 Install via homebrew
 ```
-brew install quintrino/godspeed-cli/godspeed-cli
+brew install quintrino/tap/godspeed-cli
 ````
 
 or
