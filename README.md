@@ -11,6 +11,14 @@ export GODSPEED_TOKEN="your-api-key-here"
 
 Add this to your `.zshrc` or `config.fish` to make it permanent.
 
+Alternatively, put the same line in `~/.local/share/environment/Godspeed` (`$XDG_DATA_HOME/environment/Godspeed` if `XDG_DATA_HOME` is set). It is only read when `GODSPEED_TOKEN` is unset or empty, so the environment variable always wins:
+
+```bash
+export GODSPEED_TOKEN="your-api-key-here"
+```
+
+The token is never printed or written anywhere else.
+
 Install via homebrew
 ```
 brew install quintrino/tap/godspeed-cli
@@ -176,7 +184,7 @@ To refresh the list cache, simply delete this file and the CLI will re-fetch on 
 
 The CLI uses macOS notifications (via `osascript`) to alert you of errors:
 
-- **"GODSPEED_API environment variable not set"**: You need to set your API key
+- **"GODSPEED_TOKEN is not set"**: You need to set your API key (environment variable or token file)
 - **"Failed to send task"**: The API request failed (task is cached for retry)
 - **"Error: Multiple lists specified"**: You used more than one `@list` in a single task
 
@@ -232,11 +240,12 @@ godspeed-cli "Task @WORK"
 
 ## Troubleshooting
 
-### "GODSPEED_TOKEN environment variable not set"
+### "GODSPEED_TOKEN is not set"
 Make sure you've exported your API key:
 ```bash
 export GODSPEED_TOKEN="your-key"
 ```
+or that `~/.local/share/environment/Godspeed` contains an `export GODSPEED_TOKEN="your-key"` line.
 
 ### List not found
 If your `@ListName` isn't being recognized:

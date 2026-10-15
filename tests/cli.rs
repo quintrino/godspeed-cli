@@ -122,6 +122,12 @@ impl Sandbox {
         Sandbox { data_home }
     }
 
+    fn write_token_file(&self, text: &str) {
+        let path = self.data_home.join("environment/Godspeed");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
     fn cache_file(&self) -> PathBuf {
         self.data_home.join("godspeed-cli/cache")
     }
@@ -446,4 +452,69 @@ fn more_than_one_list_is_rejected_without_creating_a_task() {
 
     assert!(stderr(&output).contains("Multiple lists"), "{}", stderr(&output));
     assert_eq!(api.count("POST", "/tasks"), 0);
+}
+
+fn authorization_of_post(api: &MockApi) -> Option<String> {
+    api.requests().into_iter().find(|r| r.method == "POST").and_then(|r| r.authorization)
+}
+
+#[test]
+fn the_token_is_read_from_the_token_file_when_the_environment_has_none() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("token-file");
+    sandbox.write_token_file("# my token\nexport OTHER=x\nexport GODSPEED_TOKEN=\"file-token\"\n");
+
+    sandbox.run_with(Some(&api.url), None, &["Task using the file token"], None);
+
+    assert_eq!(authorization_of_post(&api).as_deref(), Some("Bearer file-token"));
+}
+
+#[test]
+fn the_environment_token_wins_over_the_token_file() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("token-env-wins");
+    sandbox.write_token_file("export GODSPEED_TOKEN=\"file-token\"\n");
+
+    sandbox.run_with(Some(&api.url), Some("env-token"), &["Task"], None);
+
+    assert_eq!(authorization_of_post(&api).as_deref(), Some("Bearer env-token"));
+}
+
+#[test]
+fn an_empty_environment_token_falls_back_to_the_token_file() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("token-env-empty");
+    sandbox.write_token_file("GODSPEED_TOKEN=file-token\n");
+
+    sandbox.run_with(Some(&api.url), Some("  "), &["Task"], None);
+
+    assert_eq!(authorization_of_post(&api).as_deref(), Some("Bearer file-token"));
+}
+
+#[test]
+fn a_token_file_without_a_token_line_is_the_same_as_no_token() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("token-file-empty");
+    sandbox.write_token_file("# nothing here\nOTHER=x\n");
+
+    let output = sandbox.run_with(Some(&api.url), None, &["Task"], None);
+
+    assert!(stderr(&output).contains("environment/Godspeed"), "{}", stderr(&output));
+    assert!(api.requests().is_empty());
+}
+
+#[test]
+fn the_token_never_appears_in_the_output() {
+    let sandbox = Sandbox::new("token-secret");
+    sandbox.write_token_file("export GODSPEED_TOKEN=\"super-secret-file-token\"\n");
+    let down = MockApi::start(500);
+
+    let from_file = sandbox.run_with(Some(&down.url), None, &["Failing task"], None);
+    let from_env = sandbox.run_with(Some(&down.url), Some("super-secret-env-token"), &["Failing task"], None);
+
+    for output in [from_file, from_env] {
+        let all = format!("{}{}", stdout(&output), stderr(&output));
+        assert!(!all.contains("super-secret"), "{all}");
+    }
+    assert!(!sandbox.cache_contents().contains("super-secret"));
 }

@@ -73,6 +73,60 @@ fn get_labels_path() -> PathBuf {
     get_xdg_data_home().join("godspeed-cli").join("labels.toml")
 }
 
+/// Where the token is read from when `GODSPEED_TOKEN` isn't set in the environment.
+fn token_file_path() -> PathBuf {
+    get_xdg_data_home().join("environment").join("Godspeed")
+}
+
+/// The API token: `GODSPEED_TOKEN` if it is set and non-empty, otherwise the
+/// `GODSPEED_TOKEN=...` line of the token file. The token is never printed.
+fn load_token() -> Option<String> {
+    if let Ok(token) = env::var("GODSPEED_TOKEN") {
+        let token = token.trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
+
+    let path = token_file_path();
+    match fs::read_to_string(&path) {
+        Ok(text) => parse_token_assignment(&text),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => {
+            eprintln!("Warning: cannot read {}: {}", path.display(), e);
+            None
+        }
+    }
+}
+
+/// Finds `GODSPEED_TOKEN=value` in shell-style text, allowing `export`, comments, other
+/// variables and single or double quotes around the value.
+fn parse_token_assignment(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").map_or(line, str::trim_start);
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if name.trim() != "GODSPEED_TOKEN" {
+            continue;
+        }
+        let value = value.trim();
+        let value = ['"', '\'']
+            .iter()
+            .find_map(|q| value.strip_prefix(*q).and_then(|v| v.strip_suffix(*q)))
+            .unwrap_or(value)
+            .trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 fn ensure_directories() -> io::Result<()> {
     let data_dir = get_xdg_data_home().join("godspeed-cli");
     fs::create_dir_all(&data_dir)?;
@@ -479,7 +533,10 @@ TASK SYNTAX:
     Example: godspeed-cli "Write blog post @Work .Writing ~2h :tomorrow n: Include code samples"
 
 ENVIRONMENT:
-    GODSPEED_TOKEN    Your Godspeed API key (required to create tasks).
+    GODSPEED_TOKEN    Your Godspeed API key (required to create tasks). If it isn't set,
+                      an `export GODSPEED_TOKEN="..."` line in
+                      $XDG_DATA_HOME/environment/Godspeed (usually
+                      ~/.local/share/environment/Godspeed) is used.
 
 If a task cannot be sent it is cached and retried the next time the CLI runs.
 "#;
@@ -522,11 +579,14 @@ fn main() {
         return;
     }
 
-    let api_key = match env::var("GODSPEED_TOKEN") {
-        Ok(key) => key,
-        Err(_) => {
-            send_notification("GODSPEED_TOKEN environment variable not set");
-            eprintln!("Error: GODSPEED_TOKEN environment variable not set");
+    let api_key = match load_token() {
+        Some(key) => key,
+        None => {
+            send_notification("GODSPEED_TOKEN is not set");
+            eprintln!(
+                "Error: GODSPEED_TOKEN is not set (environment variable, or an `export GODSPEED_TOKEN=...` line in {})",
+                token_file_path().display()
+            );
             return;
         }
     };
@@ -740,6 +800,37 @@ mod tests {
         let cache = lists(&[("homework", "1")]);
         assert_eq!(find_matching_key(&cache, "work"), None);
         assert_eq!(find_list_key(&cache, "work").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn the_token_is_found_in_shell_style_text() {
+        let token = |text: &str| parse_token_assignment(text);
+        assert_eq!(token("export GODSPEED_TOKEN=\"abc123\"\n").as_deref(), Some("abc123"));
+        assert_eq!(token("GODSPEED_TOKEN=abc123").as_deref(), Some("abc123"));
+        assert_eq!(token("export GODSPEED_TOKEN='abc123'").as_deref(), Some("abc123"));
+        assert_eq!(token("  export   GODSPEED_TOKEN = \"abc123\"  ").as_deref(), Some("abc123"));
+        assert_eq!(
+            token("# comment\nOTHER=x\n\nexport GODSPEED_TOKEN=\"abc123\"\nexport LATER=y").as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn text_without_a_usable_token_assignment_gives_none() {
+        assert_eq!(parse_token_assignment(""), None);
+        assert_eq!(parse_token_assignment("# GODSPEED_TOKEN=commented-out"), None);
+        assert_eq!(parse_token_assignment("OTHER_GODSPEED_TOKEN=x\nGODSPEED_TOKENS=y"), None);
+        assert_eq!(parse_token_assignment("GODSPEED_TOKEN="), None);
+        assert_eq!(parse_token_assignment("GODSPEED_TOKEN=\"\""), None);
+        assert_eq!(parse_token_assignment("just some text"), None);
+    }
+
+    #[test]
+    fn the_first_non_empty_assignment_wins() {
+        assert_eq!(
+            parse_token_assignment("GODSPEED_TOKEN=\nGODSPEED_TOKEN=second\nGODSPEED_TOKEN=third").as_deref(),
+            Some("second")
+        );
     }
 
     #[test]
