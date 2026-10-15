@@ -1,6 +1,6 @@
 # Godspeed CLI User Guide
 
-A lightweight command-line utility for quickly creating tasks in [Godspeed App](https://godspeedapp.com/).
+A lightweight command-line utility for quickly creating tasks in [Godspeed App](https://godspeedapp.com/), and for searching them offline.
 
 ## Installation
 
@@ -371,13 +371,15 @@ If a task keeps failing and accumulating in the cache, check:
 2. The Godspeed API is accessible
 3. Your list name (if using `@`) exists
 
+The queue only holds tasks that failed to send. A task with several lists or no title is rejected straight away, and is never queued.
+
 You can manually edit or clear the cache file at `~/.local/share/godspeed-cli/cache`
 
 ## Data Storage
 
 All data is stored in `$XDG_DATA_HOME/godspeed-cli/` (typically `~/.local/share/godspeed-cli/`):
 
-- `cache`: Failed tasks waiting to be sent (plain text, separator: `---`)
+- `cache`: Failed tasks waiting to be sent (plain text, separated by `-*-*-*-` lines)
 - `lists.toml`, `labels.toml`: Cached list and label name → ID mappings (TOML format)
 - `cache.sqlite3`: The local copy of your tasks, lists and labels, written by `refresh` (SQLite)
 
