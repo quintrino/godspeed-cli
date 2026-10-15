@@ -22,6 +22,11 @@ pub fn queue_path() -> PathBuf {
     data_dir().join("cache")
 }
 
+/// The SQLite copy of the user's tasks, lists and labels, written by `refresh`.
+pub fn store_path() -> PathBuf {
+    data_dir().join("cache.sqlite3")
+}
+
 pub fn lists_path() -> PathBuf {
     data_dir().join("lists.toml")
 }

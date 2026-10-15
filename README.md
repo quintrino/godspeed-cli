@@ -57,7 +57,7 @@ echo "Buy groceries and cook dinner" | godspeed-cli
 | Command | |
 | --- | --- |
 | `add` | Create a task. This is the default, so `godspeed-cli "Buy milk"` and `godspeed-cli add "Buy milk"` are the same. |
-| `refresh` | Reserved for downloading your tasks (coming in a later release). |
+| `refresh` | Download your tasks, lists and labels into a local cache. See [Refresh](#refresh). |
 | `search` | Reserved for searching your tasks (coming in a later release). |
 
 A command is recognised only when it is the **whole first argument**, in lowercase. So `godspeed-cli "search the attic"` (quoted) and `godspeed-cli buy add milk` still create tasks. If you type the words unquoted, `godspeed-cli search the attic` runs the `search` command instead. To create a task whose text starts with a command word, quote it, put `add` in front, or use `--`:
@@ -188,6 +188,28 @@ Agenda items:
 .Management @Work :90" | godspeed-cli
 ```
 
+## Refresh
+
+`godspeed-cli refresh` downloads your tasks, lists and labels into a local SQLite database, ready for searching in a later release.
+
+```bash
+godspeed-cli refresh                      # incomplete tasks only
+godspeed-cli refresh --include-completed  # incomplete and completed tasks
+godspeed-cli refresh --json               # print the counts as JSON
+```
+
+```
+Refreshed 1432 tasks, 12 lists, 30 labels
+```
+
+- It pages through the whole account (250 tasks per request) and shows progress on stderr, so `--json` output on stdout stays clean.
+- The Godspeed API limits reads, so the CLI makes at most 9 requests a minute and then waits. That is about 2,000 tasks a minute, so a few thousand tasks take a couple of minutes. If the API answers "too many requests", it waits as long as it asks and retries.
+- Each refresh **replaces** the previous copy. Everything is downloaded first, so if it fails part-way (exit status 1) the previous copy is kept.
+- Without `--include-completed`, completed tasks are not stored, and a refresh removes any that an earlier `--include-completed` refresh stored.
+- Tasks that share exactly the same last-updated time are all kept unless more than 250 share it, which could only follow a bulk edit.
+
+The database is `$XDG_DATA_HOME/godspeed-cli/cache.sqlite3`. It needs `GODSPEED_TOKEN` like creating tasks does.
+
 ## Offline Cache
 
 If the API is unreachable or a request fails, the task is automatically cached locally. The next time you run the CLI (for any task), it will:
@@ -297,7 +319,8 @@ You can manually edit or clear the cache file at `~/.local/share/godspeed-cli/ca
 All data is stored in `$XDG_DATA_HOME/godspeed-cli/` (typically `~/.local/share/godspeed-cli/`):
 
 - `cache`: Failed tasks waiting to be sent (plain text, separator: `---`)
-- `lists.toml`: Cached list name → ID mappings (TOML format)
+- `lists.toml`, `labels.toml`: Cached list and label name → ID mappings (TOML format)
+- `cache.sqlite3`: The local copy of your tasks, lists and labels, written by `refresh` (SQLite)
 
 ## Examples
 

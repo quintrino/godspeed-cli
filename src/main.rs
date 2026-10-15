@@ -5,6 +5,8 @@ mod names;
 mod notify;
 mod paths;
 mod queue;
+mod refresh;
+mod store;
 mod task;
 mod token;
 
@@ -16,10 +18,15 @@ const HELP: &str = r#"Create a task in Godspeed from the command line.
 USAGE:
     godspeed-cli [add] [--] <TASK>...
     echo "<TASK>" | godspeed-cli
+    godspeed-cli refresh [--include-completed] [--json]
     godspeed-cli --help | --version
 
 COMMANDS:
     add       Create a task. This is the default, so `add` can be left out.
+    refresh   Download all your tasks, lists and labels into a local cache (for searching).
+              Incomplete tasks only, unless --include-completed is given. Replaces the
+              previous copy, and keeps it if the download fails. --json prints the counts as
+              JSON. The API limits reads, so a large account can take several minutes.
 
     A first argument of exactly `add`, `refresh` or `search` is a command. To create a task
     whose text starts with one of those words, write `add search the attic` or quote the
@@ -83,7 +90,10 @@ fn parse_invocation(args: &[String]) -> Invocation {
             Some("--") => Invocation::Add(rest[1..].to_vec()),
             _ => Invocation::Add(rest.to_vec()),
         },
-        "refresh" => Invocation::Refresh(rest.to_vec()),
+        "refresh" => match rest.first().map(String::as_str) {
+            Some("-h" | "--help") => Invocation::Help,
+            _ => Invocation::Refresh(rest.to_vec()),
+        },
         "search" => Invocation::Search(rest.to_vec()),
         _ => Invocation::Add(args.to_vec()),
     }
@@ -106,7 +116,7 @@ fn main() -> ExitCode {
             exit::SUCCESS
         }
         Invocation::Add(task_args) => capture::run_add(&task_args),
-        Invocation::Refresh(_) => not_available("refresh"),
+        Invocation::Refresh(refresh_args) => refresh::run_refresh(&refresh_args),
         Invocation::Search(_) => not_available("search"),
     }
 }
@@ -176,6 +186,11 @@ mod tests {
     fn refresh_and_search_are_commands_when_they_are_the_first_argument() {
         assert_eq!(parse_invocation(&args(&["refresh"])), Invocation::Refresh(vec![]));
         assert_eq!(
+            parse_invocation(&args(&["refresh", "--include-completed", "--json"])),
+            Invocation::Refresh(args(&["--include-completed", "--json"]))
+        );
+        assert_eq!(parse_invocation(&args(&["refresh", "--help"])), Invocation::Help);
+        assert_eq!(
             parse_invocation(&args(&["search", "label:Low", "due:today"])),
             Invocation::Search(args(&["label:Low", "due:today"]))
         );
@@ -224,7 +239,7 @@ mod tests {
     fn the_help_text_covers_the_options_and_the_task_syntax() {
         for text in [
             "--help", "--version", "--", "GODSPEED_TOKEN", ".label", "@list", "~duration", ":date", "n: text",
-            "add", "EXIT STATUS", "search the attic",
+            "add", "EXIT STATUS", "search the attic", "refresh", "--include-completed",
         ] {
             assert!(HELP.contains(text), "{text} is not in the help");
         }

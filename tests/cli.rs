@@ -3,8 +3,9 @@
 //! Each run gets its own `XDG_DATA_HOME` and an explicit environment, so the tests don't
 //! touch the user's cache or token and can run in parallel.
 
-use chrono::{Duration, Local, NaiveDate};
+use chrono::{DateTime, Duration, Local, NaiveDate, SecondsFormat};
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -21,13 +22,22 @@ const CACHE_DIVIDER: &str = "-*-*-*-";
 struct Recorded {
     method: String,
     path: String,
+    query: String,
     authorization: Option<String>,
     body: String,
+}
+
+/// A canned answer to `GET /tasks`.
+struct Reply {
+    status: u16,
+    body: String,
+    retry_after: Option<u32>,
 }
 
 struct MockApi {
     url: String,
     requests: Arc<Mutex<Vec<Recorded>>>,
+    task_replies: Arc<Mutex<VecDeque<Reply>>>,
 }
 
 impl MockApi {
@@ -36,14 +46,41 @@ impl MockApi {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let task_replies = Arc::new(Mutex::new(VecDeque::new()));
         let recorded = Arc::clone(&requests);
+        let replies = Arc::clone(&task_replies);
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let recorded = Arc::clone(&recorded);
-                thread::spawn(move || serve(stream, &recorded, post_status));
+                let replies = Arc::clone(&replies);
+                thread::spawn(move || serve(stream, &recorded, &replies, post_status));
             }
         });
-        MockApi { url, requests }
+        MockApi { url, requests, task_replies }
+    }
+
+    /// The next `GET /tasks` answers with this page; with none queued it answers 404.
+    fn queue_tasks_page(&self, tasks: Vec<Value>) {
+        let body = json!({
+            "success": true,
+            "tasks": tasks,
+            "lists": [{"id": "list-work", "name": "Work Projects"}, {"id": "list-home", "name": "Home"}],
+            "labels": [{"id": "label-urgent", "name": "Urgent"}],
+        });
+        self.task_replies.lock().unwrap().push_back(Reply { status: 200, body: body.to_string(), retry_after: None });
+    }
+
+    fn queue_tasks_status(&self, status: u16, retry_after: Option<u32>) {
+        self.task_replies.lock().unwrap().push_back(Reply { status, body: "{}".to_string(), retry_after });
+    }
+
+    /// The query strings of every `GET /tasks`, in order.
+    fn task_queries(&self) -> Vec<String> {
+        self.requests()
+            .iter()
+            .filter(|r| r.method == "GET" && r.path == "/tasks")
+            .map(|r| r.query.clone())
+            .collect()
     }
 
     fn requests(&self) -> Vec<Recorded> {
@@ -64,7 +101,7 @@ impl MockApi {
     }
 }
 
-fn serve(stream: TcpStream, recorded: &Mutex<Vec<Recorded>>, post_status: u16) {
+fn serve(stream: TcpStream, recorded: &Mutex<Vec<Recorded>>, replies: &Mutex<VecDeque<Reply>>, post_status: u16) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
@@ -72,7 +109,9 @@ fn serve(stream: TcpStream, recorded: &Mutex<Vec<Recorded>>, post_status: u16) {
     }
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
-    let path = parts.next().unwrap_or("").to_string();
+    let target = parts.next().unwrap_or("");
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let (path, query) = (path.to_string(), query.to_string());
 
     let mut content_length = 0;
     let mut authorization = None;
@@ -93,16 +132,25 @@ fn serve(stream: TcpStream, recorded: &Mutex<Vec<Recorded>>, post_status: u16) {
     reader.read_exact(&mut body).unwrap();
     let body = String::from_utf8(body).unwrap();
 
+    let mut retry_after = None;
     let (status, payload) = match (method.as_str(), path.as_str()) {
-        ("GET", "/lists") => (200, LISTS),
-        ("GET", "/labels") => (200, LABELS),
-        ("POST", "/tasks") => (post_status, "{}"),
-        _ => (404, "{}"),
+        ("GET", "/lists") => (200, LISTS.to_string()),
+        ("GET", "/labels") => (200, LABELS.to_string()),
+        ("GET", "/tasks") => match replies.lock().unwrap().pop_front() {
+            Some(reply) => {
+                retry_after = reply.retry_after;
+                (reply.status, reply.body)
+            }
+            None => (404, "{}".to_string()),
+        },
+        ("POST", "/tasks") => (post_status, "{}".to_string()),
+        _ => (404, "{}".to_string()),
     };
-    recorded.lock().unwrap().push(Recorded { method, path, authorization, body });
+    recorded.lock().unwrap().push(Recorded { method, path, query, authorization, body });
 
+    let retry_header = retry_after.map(|s| format!("Retry-After: {s}\r\n")).unwrap_or_default();
     let response = format!(
-        "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\n{retry_header}Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
         payload.len()
     );
     let mut stream = stream;
@@ -126,6 +174,16 @@ impl Sandbox {
         let path = self.data_home.join("environment/Godspeed");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
+    }
+
+    fn stored_count(&self, table: &str) -> i64 {
+        let connection = rusqlite::Connection::open(self.data_home.join("godspeed-cli/cache.sqlite3")).unwrap();
+        connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap()
+    }
+
+    fn stored_complete_count(&self) -> i64 {
+        let connection = rusqlite::Connection::open(self.data_home.join("godspeed-cli/cache.sqlite3")).unwrap();
+        connection.query_row("SELECT COUNT(*) FROM tasks WHERE is_complete = 1", [], |row| row.get(0)).unwrap()
     }
 
     /// Pre-fills the retry queue, as an earlier failed run would have.
@@ -608,7 +666,7 @@ fn an_unquoted_command_word_runs_the_command_and_creates_no_task() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("command-word-runs");
 
-    let output = sandbox.run(&api, &["refresh"]);
+    let output = sandbox.run(&api, &["search", "the", "attic"]);
 
     assert_eq!(code(&output), 2);
     assert_eq!(api.count("POST", "/tasks"), 0);
@@ -677,4 +735,181 @@ fn the_token_never_appears_in_the_output() {
         assert!(!all.contains("super-secret"), "{all}");
     }
     assert!(!sandbox.cache_contents().contains("super-secret"));
+}
+
+// ---- refresh ----
+
+/// A timestamp `n` minutes before a fixed moment, in the form the API's cursor takes.
+fn minutes_ago(n: i64) -> String {
+    DateTime::from_timestamp(1_800_000_000 - n * 60, 0)
+        .unwrap()
+        .to_rfc3339_opts(SecondsFormat::Micros, true)
+}
+
+/// Tasks `t{i}` for each `i` in `range`, newest first, one minute apart.
+fn tasks_page(range: std::ops::Range<i64>) -> Vec<Value> {
+    range
+        .map(|i| json!({"id": format!("t{i:04}"), "title": format!("Task {i}"), "updated_at": minutes_ago(i)}))
+        .collect()
+}
+
+#[test]
+fn refresh_downloads_tasks_lists_and_labels_into_the_cache() {
+    let api = MockApi::start(200);
+    api.queue_tasks_page(tasks_page(0..3));
+    let sandbox = Sandbox::new("refresh-basic");
+
+    let output = sandbox.run(&api, &["refresh"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim(), "Refreshed 3 tasks, 2 lists, 1 labels");
+    assert_eq!(api.task_queries(), vec!["status=incomplete"]);
+    let request = api.requests().into_iter().find(|r| r.path == "/tasks").unwrap();
+    assert_eq!(request.authorization.as_deref(), Some("Bearer test-token"));
+    assert_eq!(sandbox.stored_count("tasks"), 3);
+    assert_eq!(sandbox.stored_count("lists"), 2);
+    assert_eq!(sandbox.stored_count("labels"), 1);
+    assert_eq!(sandbox.stored_complete_count(), 0);
+}
+
+#[test]
+fn refresh_follows_updated_before_until_every_task_is_downloaded() {
+    let api = MockApi::start(200);
+    // A full page, then a short one that starts with the task the first page ended on.
+    api.queue_tasks_page(tasks_page(0..250));
+    api.queue_tasks_page(tasks_page(249..254));
+    let sandbox = Sandbox::new("refresh-pages");
+
+    let output = sandbox.run(&api, &["refresh"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim(), "Refreshed 254 tasks, 2 lists, 1 labels");
+    let cursor = minutes_ago(249).replace(':', "%3A");
+    assert_eq!(
+        api.task_queries(),
+        vec!["status=incomplete".to_string(), format!("status=incomplete&updated_before={cursor}")]
+    );
+    assert_eq!(sandbox.stored_count("tasks"), 254);
+}
+
+#[test]
+fn refresh_include_completed_also_downloads_completed_tasks_and_flags_them() {
+    let api = MockApi::start(200);
+    api.queue_tasks_page(tasks_page(0..2));
+    api.queue_tasks_page(tasks_page(100..104));
+    let sandbox = Sandbox::new("refresh-completed");
+
+    let output = sandbox.run(&api, &["refresh", "--include-completed"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(api.task_queries(), vec!["status=incomplete", "status=complete"]);
+    assert_eq!(sandbox.stored_count("tasks"), 6);
+    assert_eq!(sandbox.stored_complete_count(), 4);
+}
+
+#[test]
+fn refresh_json_prints_only_the_report_on_stdout() {
+    let api = MockApi::start(200);
+    api.queue_tasks_page(tasks_page(0..4));
+    let sandbox = Sandbox::new("refresh-json");
+
+    let output = sandbox.run(&api, &["refresh", "--json"]);
+
+    let report: Value = serde_json::from_str(&stdout(&output)).expect("stdout is only JSON");
+    assert_eq!(report["tasks_count"], 4);
+    assert_eq!(report["lists_count"], 2);
+    assert_eq!(report["labels_count"], 1);
+    assert_eq!(report["include_completed"], false);
+    assert!(report["refreshed_at"].as_str().unwrap().ends_with('Z'));
+    assert!(stderr(&output).contains("Fetched 4 tasks"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_new_refresh_replaces_the_previous_copy() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("refresh-replaces");
+    api.queue_tasks_page(tasks_page(0..5));
+    sandbox.run(&api, &["refresh"]);
+    api.queue_tasks_page(tasks_page(10..12));
+
+    let output = sandbox.run(&api, &["refresh"]);
+
+    assert_eq!(stdout(&output).trim(), "Refreshed 2 tasks, 2 lists, 1 labels");
+    assert_eq!(sandbox.stored_count("tasks"), 2);
+}
+
+#[test]
+fn a_refresh_that_fails_part_way_leaves_the_previous_copy_alone() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("refresh-keeps-old");
+    api.queue_tasks_page(tasks_page(0..5));
+    sandbox.run(&api, &["refresh"]);
+    // A full first page, then the API breaks.
+    api.queue_tasks_page(tasks_page(0..250));
+    api.queue_tasks_status(500, None);
+
+    let output = sandbox.run(&api, &["refresh"]);
+
+    assert_eq!(code(&output), 1);
+    assert!(stderr(&output).contains("Refresh failed"), "{}", stderr(&output));
+    assert!(stdout(&output).is_empty());
+    assert_eq!(sandbox.stored_count("tasks"), 5);
+}
+
+#[test]
+fn refresh_waits_as_told_when_rate_limited_and_then_succeeds() {
+    let api = MockApi::start(200);
+    api.queue_tasks_status(429, Some(1));
+    api.queue_tasks_page(tasks_page(0..2));
+    let sandbox = Sandbox::new("refresh-429");
+    let started = std::time::Instant::now();
+
+    let output = sandbox.run(&api, &["refresh"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+    assert_eq!(api.task_queries().len(), 2);
+    assert!(stderr(&output).contains("Rate limited"), "{}", stderr(&output));
+    assert_eq!(sandbox.stored_count("tasks"), 2);
+}
+
+#[test]
+fn refresh_needs_a_token_and_rejects_unknown_arguments_without_contacting_the_api() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("refresh-usage");
+
+    let no_token = sandbox.run_with(Some(&api.url), None, &["refresh"], None);
+    let bad_flag = sandbox.run(&api, &["refresh", "--everything"]);
+    let positional = sandbox.run(&api, &["refresh", "now"]);
+
+    assert_eq!(code(&no_token), 2);
+    assert!(stderr(&no_token).contains("GODSPEED_TOKEN"));
+    assert_eq!(code(&bad_flag), 2);
+    assert!(stderr(&bad_flag).contains("--everything"), "{}", stderr(&bad_flag));
+    assert_eq!(code(&positional), 2);
+    assert!(api.requests().is_empty());
+}
+
+#[test]
+fn refresh_help_needs_no_token_and_sends_nothing() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("refresh-help");
+
+    let output = sandbox.run_with(Some(&api.url), None, &["refresh", "--help"], None);
+
+    assert_eq!(code(&output), 0);
+    assert!(stdout(&output).contains("--include-completed"));
+    assert!(api.requests().is_empty());
+}
+
+#[test]
+fn refresh_never_prints_the_token() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("refresh-secret");
+    api.queue_tasks_status(500, None);
+
+    let output = sandbox.run_with(Some(&api.url), Some("super-secret-refresh-token"), &["refresh"], None);
+
+    let all = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(!all.contains("super-secret"), "{all}");
 }
