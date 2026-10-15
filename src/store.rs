@@ -16,6 +16,12 @@ pub struct CachedTask {
     pub complete: bool,
 }
 
+/// A task read back from the store.
+pub struct StoredTask {
+    pub json: Value,
+    pub complete: bool,
+}
+
 #[derive(Default)]
 pub struct Snapshot {
     pub tasks: Vec<CachedTask>,
@@ -117,6 +123,59 @@ impl Store {
         self.counts()
     }
 
+    /// Cached tasks, most recently updated first. Completed ones only if `include_completed`.
+    pub fn tasks(&self, include_completed: bool) -> Result<Vec<StoredTask>> {
+        let sql = if include_completed {
+            "SELECT json, is_complete FROM tasks ORDER BY updated_at DESC, id"
+        } else {
+            "SELECT json, is_complete FROM tasks WHERE is_complete = 0 ORDER BY updated_at DESC, id"
+        };
+        let mut statement = self.conn.prepare(sql)?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            let (json, complete) = row?;
+            tasks.push(StoredTask { json: serde_json::from_str(&json)?, complete: complete != 0 });
+        }
+        Ok(tasks)
+    }
+
+    pub fn lists(&self) -> Result<Vec<Value>> {
+        self.json_rows("SELECT json FROM lists ORDER BY id")
+    }
+
+    pub fn labels(&self) -> Result<Vec<Value>> {
+        self.json_rows("SELECT json FROM labels ORDER BY id")
+    }
+
+    fn json_rows(&self, sql: &str) -> Result<Vec<Value>> {
+        let mut statement = self.conn.prepare(sql)?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut values = Vec::new();
+        for row in rows {
+            values.push(serde_json::from_str(&row?)?);
+        }
+        Ok(values)
+    }
+
+    /// How many completed tasks the copy holds.
+    pub fn complete_count(&self) -> Result<usize> {
+        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM tasks WHERE is_complete = 1", [], |row| row.get(0))?;
+        Ok(n as usize)
+    }
+
+    /// When `refresh` last wrote the copy, as an RFC 3339 string. None if it never has.
+    pub fn refreshed_at(&self) -> Result<Option<String>> {
+        let found = self.conn.query_row("SELECT value FROM metadata WHERE key = 'refreshed_at'", [], |row| {
+            row.get::<_, String>(0)
+        });
+        match found {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn counts(&self) -> Result<Counts> {
         let count = |table: &str| -> Result<usize> {
             let n: i64 = self.conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))?;
@@ -213,6 +272,37 @@ mod tests {
         let counts = store.replace_all(&snapshot, "t").unwrap();
 
         assert_eq!(counts, Counts { tasks: 1, lists: 1, labels: 0 });
+    }
+
+    #[test]
+    fn stored_data_reads_back_newest_first_with_completed_tasks_optional() {
+        let mut store = memory();
+        assert_eq!(store.refreshed_at().unwrap(), None);
+        let at = |id: &str, updated: &str, complete| CachedTask {
+            json: json!({"id": id, "updated_at": updated}),
+            complete,
+        };
+        let snapshot = Snapshot {
+            tasks: vec![
+                at("old", "2026-01-01T00:00:00Z", false),
+                at("new", "2026-03-01T00:00:00Z", false),
+                at("done", "2026-02-01T00:00:00Z", true),
+            ],
+            lists: vec![json!({"id": "l1", "name": "Inbox"})],
+            labels: vec![json!({"id": "x1", "name": "Low"})],
+        };
+        store.replace_all(&snapshot, "2026-10-15T00:00:00Z").unwrap();
+
+        let open: Vec<String> =
+            store.tasks(false).unwrap().iter().map(|t| t.json["id"].as_str().unwrap().to_string()).collect();
+        assert_eq!(open, vec!["new", "old"]);
+        let all = store.tasks(true).unwrap();
+        assert_eq!(all.iter().map(|t| t.json["id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["new", "done", "old"]);
+        assert_eq!(all.iter().filter(|t| t.complete).count(), 1);
+        assert_eq!(store.complete_count().unwrap(), 1);
+        assert_eq!(store.lists().unwrap(), vec![json!({"id": "l1", "name": "Inbox"})]);
+        assert_eq!(store.labels().unwrap(), vec![json!({"id": "x1", "name": "Low"})]);
+        assert_eq!(store.refreshed_at().unwrap().as_deref(), Some("2026-10-15T00:00:00Z"));
     }
 
     #[test]

@@ -58,7 +58,7 @@ echo "Buy groceries and cook dinner" | godspeed-cli
 | --- | --- |
 | `add` | Create a task. This is the default, so `godspeed-cli "Buy milk"` and `godspeed-cli add "Buy milk"` are the same. |
 | `refresh` | Download your tasks, lists and labels into a local cache. See [Refresh](#refresh). |
-| `search` | Reserved for searching your tasks (coming in a later release). |
+| `search` | Search the local copy made by `refresh`, offline. See [Search](#search). |
 
 A command is recognised only when it is the **whole first argument**, in lowercase. So `godspeed-cli "search the attic"` (quoted) and `godspeed-cli buy add milk` still create tasks. If you type the words unquoted, `godspeed-cli search the attic` runs the `search` command instead. To create a task whose text starts with a command word, quote it, put `add` in front, or use `--`:
 
@@ -190,7 +190,7 @@ Agenda items:
 
 ## Refresh
 
-`godspeed-cli refresh` downloads your tasks, lists and labels into a local SQLite database, ready for searching in a later release.
+`godspeed-cli refresh` downloads your tasks, lists and labels into a local SQLite database, ready for [searching](#search).
 
 ```bash
 godspeed-cli refresh                      # incomplete tasks only
@@ -209,6 +209,65 @@ Refreshed 1432 tasks, 12 lists, 30 labels
 - Tasks that share exactly the same last-updated time are all kept unless more than 250 share it, which could only follow a bulk edit.
 
 The database is `$XDG_DATA_HOME/godspeed-cli/cache.sqlite3`. It needs `GODSPEED_TOKEN` like creating tasks does.
+
+## Search
+
+`godspeed-cli search` finds tasks in the local copy made by [`refresh`](#refresh). It works offline and needs no token. Run `godspeed-cli search --help` for the full syntax.
+
+```bash
+godspeed-cli search invoice
+godspeed-cli search 'due:20261031 label:Low'
+godspeed-cli search 'title:"tax return" list:Admin'
+godspeed-cli search '(label:Low | label:Medium) due<=2026-10-31'
+godspeed-cli search 'has:notes duration>=30m group:list sort-desc:due limit:20'
+godspeed-cli search 'is:complete label:Low sort-desc:created'
+godspeed-cli search -label:Low --json
+```
+
+Only incomplete tasks are searched unless the query contains `is:complete` (and the copy was made with `refresh --include-completed`). With no query, every incomplete task is listed.
+
+**Quote the query.** The arguments are joined with spaces into one query, so `search '(a | b) !c'` works but an unquoted `|` or `(` is taken by the shell. A phrase needs its own quotes inside the query: `search '"tax return"'`; `search "tax return"` means *tax* and *return*.
+
+| Syntax | Meaning |
+| --- | --- |
+| `word`, `"a phrase"` | Found (case-insensitively) in the title, notes or attachment names |
+| `a b`, `a & b`, `a \| b`, `!a`, `-a`, `( )` | And, or, not, grouping. `\|` binds loosest, then and, then not |
+| `title:` `notes:` `attachment:` | Just that field |
+| `list:` `folder:` `in:` `label:` `label-group:` | List name, list path, label name, label group |
+| `due:` `first-due:` `snoozed:` `start:` `created:` | A date: `today`, `tomorrow`, `YYYYMMDD`, `YYYY-MM-DD`, `3d`, `-2d`, `2w`, or `week`, `next-week`, `month`, `year` |
+| `due<` `due<=` `due>` `due>=` `due=` | Compare with a single date, for example `due<=3d` |
+| `duration<30m` `duration>=1.5h` `snooze-count=2` `indent-level>0` | Numbers; durations in minutes or with `m` / `h` |
+| `has:notes` `has:attachment` `has:label` `has:repeat` `has:due` `has:snooze` `has:start` `has:due-time` `has:start-time` `has:bookmark` `has:email` `has:duration` `has:any` | The task has that |
+| `is:complete` `is:available` `is:uncleared` | State |
+| `sort:` `sort-asc:` `sort-desc:` | `title`, `list`, `label`, `due`, `first-due`, `snoozed`, `start`, `created`, `updated`, `duration`, `snooze-count`, `indent-level`. Repeat to sort by several; `sort:label:High\|Medium\|Low` puts those first |
+| `group:` | `list`, `label`, `due`, `first-due`, `snoozed`, `start`, `created`; `group:list:Work\|Home` puts those first. A task with several labels appears under one unless `enable:duplicates` is given |
+| `limit:N` | At most N tasks, after sorting |
+
+Details worth knowing:
+
+- A task that has no value for a date or number never matches a test on it, so `due<today` does not match undated tasks (and `!due<today` does).
+- `due` is the later of the due date and the snooze date; `first-due` ignores snoozes. `is:available` means there is no start date or snooze still in the future.
+- Weeks run Monday to Sunday. `24h` means one day: hours are rounded down to whole days. Periods (`week`, `month`, ...) work with `:` and `=` only, not `<` or `>`.
+- Something that looks like `operator:value` but isn't an operator, such as `10:30`, is searched for as plain text. A misspelt operator is therefore a plain word rather than an error, but a known operator with a bad value (`due:someday`, `has:wings`) is an error.
+- `enable:nested` and `disable:nested` are rejected, because the local copy doesn't keep Godspeed's sub-task layout.
+
+### Output
+
+The default output is a table with a header row. Titles are cut to 80 characters, lists to 12, labels to 20, ending in `…`, and the due date column shows the `due` date. With `group:`, each group gets a heading with a count and no header row. `--json` prints the full task records, with `list_names` and `label_names` added, as an array (or an array of `{"group", "tasks"}` objects when grouping). Messages such as `No matching tasks.` and the age note go to stderr, so stdout holds only results.
+
+| Exit status | Meaning |
+| --- | --- |
+| `0` | The search ran, even if nothing matched |
+| `1` | The local copy couldn't be read |
+| `2` | The query is invalid, or `refresh` hasn't been run yet |
+
+If the local copy is a day or more old, a note says so on stderr.
+
+### Task fields it relies on
+
+Search reads these fields from each task's JSON: `title`, `notes`, `attachments`, `list_id` (and `list_ordinals`), `label_ids`, `due_at`, `timeless_due_at`, `snoozed_until`, `timeless_snoozed_until`, `starts_at`, `timeless_starts_at`, `created_at`, `updated_at`, `duration_minutes`, `snooze_count`, `indent_level`, `repeat` / `recurrence` / `repeat_rule`, `bookmarked_at`, `email` / `email_id` / `source_email`, `cleared_at` / `is_cleared`. Lists use `name` and `path`; labels use `name` and `group_name`.
+
+`title`, `notes`, `list_id`, `label_ids`, `timeless_due_at` and `duration_minutes` are the fields that task creation sends. The others were taken from another Godspeed client and have **not been checked against a real account**. If an operator never matches, look at what the API returned for one of your tasks (`sqlite3 ~/.local/share/godspeed-cli/cache.sqlite3 'select json from tasks limit 1'`) and compare the field names. They are all read in `src/eval.rs`.
 
 ## Offline Cache
 

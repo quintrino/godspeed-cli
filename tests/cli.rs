@@ -61,12 +61,15 @@ impl MockApi {
 
     /// The next `GET /tasks` answers with this page; with none queued it answers 404.
     fn queue_tasks_page(&self, tasks: Vec<Value>) {
-        let body = json!({
-            "success": true,
-            "tasks": tasks,
-            "lists": [{"id": "list-work", "name": "Work Projects"}, {"id": "list-home", "name": "Home"}],
-            "labels": [{"id": "label-urgent", "name": "Urgent"}],
-        });
+        self.queue_page_with(
+            tasks,
+            json!([{"id": "list-work", "name": "Work Projects"}, {"id": "list-home", "name": "Home"}]),
+            json!([{"id": "label-urgent", "name": "Urgent"}]),
+        );
+    }
+
+    fn queue_page_with(&self, tasks: Vec<Value>, lists: Value, labels: Value) {
+        let body = json!({"success": true, "tasks": tasks, "lists": lists, "labels": labels});
         self.task_replies.lock().unwrap().push_back(Reply { status: 200, body: body.to_string(), retry_after: None });
     }
 
@@ -912,4 +915,300 @@ fn refresh_never_prints_the_token() {
 
     let all = format!("{}{}", stdout(&output), stderr(&output));
     assert!(!all.contains("super-secret"), "{all}");
+}
+
+// ---- search ----
+
+fn search_lists() -> Value {
+    json!([{"id": "list-work", "name": "Work Projects"}, {"id": "list-home", "name": "Home"}])
+}
+
+fn search_labels() -> Value {
+    json!([{"id": "label-urgent", "name": "Urgent", "group_name": "Priority"}, {"id": "label-low", "name": "Low", "group_name": "Priority"}])
+}
+
+fn incomplete_tasks() -> Vec<Value> {
+    vec![
+        json!({"id": "t1", "title": "Pay rent", "notes": "ring the landlord", "list_id": "list-home",
+               "label_ids": ["label-urgent"], "timeless_due_at": "2026-10-31", "duration_minutes": 30,
+               "updated_at": "2026-03-03T00:00:00Z"}),
+        json!({"id": "t2", "title": "Write blog post", "list_id": "list-work", "label_ids": ["label-low"],
+               "timeless_due_at": "2026-11-15", "duration_minutes": 120, "updated_at": "2026-03-02T00:00:00Z"}),
+        json!({"id": "t3", "title": "Buy milk", "list_id": "list-home", "updated_at": "2026-03-01T00:00:00Z"}),
+    ]
+}
+
+fn completed_tasks() -> Vec<Value> {
+    vec![json!({"id": "t4", "title": "Old report", "list_id": "list-work", "label_ids": ["label-low"],
+                "updated_at": "2026-02-01T00:00:00Z"})]
+}
+
+/// A sandbox whose cache was filled by a real `refresh` against the mock API.
+fn refreshed(name: &str, include_completed: bool) -> Sandbox {
+    let api = MockApi::start(200);
+    api.queue_page_with(incomplete_tasks(), search_lists(), search_labels());
+    let mut args = vec!["refresh"];
+    if include_completed {
+        api.queue_page_with(completed_tasks(), search_lists(), search_labels());
+        args.push("--include-completed");
+    }
+    let sandbox = Sandbox::new(name);
+    let output = sandbox.run(&api, &args);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    sandbox
+}
+
+/// Runs `search` with no token and no API: it only reads the cache.
+fn search(sandbox: &Sandbox, args: &[&str]) -> Output {
+    let mut full = vec!["search"];
+    full.extend_from_slice(args);
+    sandbox.run_with(None, None, &full, None)
+}
+
+fn titles_in_table(output: &Output) -> Vec<String> {
+    stdout(output)
+        .lines()
+        .skip(1)
+        .map(|line| line.split("  ").next().unwrap().trim().to_string())
+        .collect()
+}
+
+fn ids_in_json(output: &Output) -> Vec<String> {
+    let parsed: Value = serde_json::from_str(&stdout(output)).expect("stdout is JSON");
+    parsed.as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn search_finds_a_word_and_prints_a_table_with_a_header() {
+    let sandbox = refreshed("search-word", false);
+
+    let output = search(&sandbox, &["landlord"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let text = stdout(&output);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].starts_with("TITLE") && lines[0].contains("LIST") && lines[0].contains("DUE") && lines[0].ends_with("LABELS"));
+    assert_eq!(lines[1], format!("{:<80}  {:<12}  {:<10}  Urgent", "Pay rent", "Home", "2026-10-31"));
+}
+
+#[test]
+fn search_needs_no_token_and_no_network() {
+    let sandbox = refreshed("search-offline", false);
+
+    let output = sandbox.run_with(Some("http://127.0.0.1:1"), None, &["search", "milk"], None);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(titles_in_table(&output), vec!["Buy milk"]);
+}
+
+#[test]
+fn an_empty_search_lists_every_incomplete_task_newest_update_first() {
+    let sandbox = refreshed("search-all", true);
+
+    let output = search(&sandbox, &[]);
+
+    assert_eq!(titles_in_table(&output), vec!["Pay rent", "Write blog post", "Buy milk"]);
+}
+
+#[test]
+fn completed_tasks_are_searched_only_with_is_complete() {
+    let sandbox = refreshed("search-complete", true);
+
+    let without = search(&sandbox, &["report"]);
+    let with = search(&sandbox, &["is:complete", "report"]);
+    let negated = search(&sandbox, &["is:complete", "!is:complete"]);
+
+    assert!(stdout(&without).is_empty());
+    assert_eq!(titles_in_table(&with), vec!["Old report"]);
+    assert!(stdout(&negated).is_empty());
+}
+
+#[test]
+fn is_complete_without_cached_completed_tasks_says_how_to_get_them() {
+    let sandbox = refreshed("search-no-completed", false);
+
+    let output = search(&sandbox, &["is:complete"]);
+
+    assert_eq!(code(&output), 0);
+    assert!(stdout(&output).is_empty());
+    assert!(stderr(&output).contains("refresh --include-completed"), "{}", stderr(&output));
+}
+
+#[test]
+fn field_boolean_and_date_operators_work_together() {
+    let sandbox = refreshed("search-operators", false);
+
+    let both = search(&sandbox, &["(label:low | label:urgent) due<=20261101"]);
+    let in_work = search(&sandbox, &["list:work", "has:label"]);
+    let negated = search(&sandbox, &["-label:low"]);
+    let short = search(&sandbox, &["duration<60m"]);
+    let long = search(&sandbox, &["duration>=1.5h"]);
+    let group = search(&sandbox, &["label-group:priority", "due:2026-11-15"]);
+
+    assert_eq!(titles_in_table(&both), vec!["Pay rent"]);
+    assert_eq!(titles_in_table(&in_work), vec!["Write blog post"]);
+    assert_eq!(titles_in_table(&negated), vec!["Pay rent", "Buy milk"]);
+    assert_eq!(titles_in_table(&short), vec!["Pay rent"]);
+    assert_eq!(titles_in_table(&long), vec!["Write blog post"]);
+    assert_eq!(titles_in_table(&group), vec!["Write blog post"]);
+}
+
+#[test]
+fn the_query_can_be_one_argument_or_many() {
+    let sandbox = refreshed("search-args", false);
+
+    let one = search(&sandbox, &["label:low due:20261115"]);
+    let many = search(&sandbox, &["label:low", "due:20261115"]);
+
+    assert_eq!(titles_in_table(&one), vec!["Write blog post"]);
+    assert_eq!(stdout(&one), stdout(&many));
+}
+
+#[test]
+fn a_query_starting_with_a_dash_is_a_negation_and_not_an_option() {
+    let sandbox = refreshed("search-dash", false);
+
+    let output = search(&sandbox, &["-label:low", "--json"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(ids_in_json(&output), vec!["t1", "t3"]);
+}
+
+#[test]
+fn json_output_has_the_full_task_plus_list_and_label_names() {
+    let sandbox = refreshed("search-json", false);
+
+    let output = search(&sandbox, &["rent", "--json"]);
+
+    let parsed: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(parsed.as_array().unwrap().len(), 1);
+    let task = &parsed[0];
+    assert_eq!(task["id"], "t1");
+    assert_eq!(task["notes"], "ring the landlord");
+    assert_eq!(task["duration_minutes"], 30);
+    assert_eq!(task["list_names"], json!(["Home"]));
+    assert_eq!(task["label_names"], json!(["Urgent"]));
+}
+
+#[test]
+fn sorting_limiting_and_grouping() {
+    let sandbox = refreshed("search-present", false);
+
+    let by_due = search(&sandbox, &["sort-desc:due", "--json"]);
+    let limited = search(&sandbox, &["sort:title", "limit:2", "--json"]);
+    let by_label = search(&sandbox, &["sort:label:Urgent|Low", "--json"]);
+    let grouped = search(&sandbox, &["group:list:Home", "sort:title"]);
+
+    assert_eq!(ids_in_json(&by_due), vec!["t2", "t1", "t3"]);
+    assert_eq!(ids_in_json(&limited), vec!["t3", "t1"]);
+    assert_eq!(ids_in_json(&by_label), vec!["t1", "t2", "t3"]);
+    let text = stdout(&grouped);
+    let headings: Vec<&str> = text.lines().filter(|l| l.ends_with(')')).collect();
+    assert_eq!(headings, vec!["Home (2)", "Work Projects (1)"], "{text}");
+    assert!(text.find("Buy milk").unwrap() < text.find("Pay rent").unwrap());
+}
+
+#[test]
+fn grouped_json_is_an_array_of_groups() {
+    let sandbox = refreshed("search-group-json", false);
+
+    let output = search(&sandbox, &["group:list", "--json"]);
+
+    let parsed: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(parsed[0]["group"], "Home");
+    assert_eq!(parsed[0]["tasks"].as_array().unwrap().len(), 2);
+    assert_eq!(parsed[1]["group"], "Work Projects");
+}
+
+#[test]
+fn no_matches_is_success_with_a_message_on_stderr_and_an_empty_array_in_json() {
+    let sandbox = refreshed("search-none", false);
+
+    let table = search(&sandbox, &["zebra"]);
+    let json = search(&sandbox, &["zebra", "--json"]);
+
+    assert_eq!(code(&table), 0);
+    assert!(stdout(&table).is_empty());
+    assert!(stderr(&table).contains("No matching tasks."), "{}", stderr(&table));
+    assert_eq!(stdout(&json).trim(), "[]");
+    assert!(!stderr(&json).contains("No matching"));
+}
+
+#[test]
+fn an_invalid_query_is_a_usage_error_with_a_helpful_message() {
+    let sandbox = refreshed("search-invalid", false);
+
+    for (query, message) in [
+        ("has:wings", "Unknown trait"),
+        ("(label:low", "Unclosed parenthesis"),
+        ("due:someday", "Invalid date"),
+        ("sort:colour", "Unknown sort field"),
+        ("enable:nested", "nested isn't supported"),
+        ("title:\"open", "Unclosed quote"),
+        ("limit:many", "Invalid limit"),
+    ] {
+        let output = search(&sandbox, &[query]);
+        assert_eq!(code(&output), 2, "{query}");
+        assert!(stdout(&output).is_empty(), "{query}");
+        assert!(stderr(&output).contains(message), "{query}: {}", stderr(&output));
+    }
+}
+
+#[test]
+fn searching_before_the_first_refresh_says_to_refresh_and_creates_no_cache() {
+    let sandbox = Sandbox::new("search-no-cache");
+
+    let output = search(&sandbox, &["anything"]);
+
+    assert_eq!(code(&output), 2);
+    assert!(stderr(&output).contains("godspeed-cli refresh"), "{}", stderr(&output));
+    assert!(!sandbox.data_home.join("godspeed-cli/cache.sqlite3").exists());
+}
+
+#[test]
+fn an_old_copy_is_mentioned_on_stderr_only() {
+    let sandbox = refreshed("search-stale", false);
+    let connection = rusqlite::Connection::open(sandbox.data_home.join("godspeed-cli/cache.sqlite3")).unwrap();
+    connection.execute("UPDATE metadata SET value = '2020-01-01T00:00:00Z' WHERE key = 'refreshed_at'", []).unwrap();
+    drop(connection);
+
+    let output = search(&sandbox, &["milk", "--json"]);
+
+    assert!(stderr(&output).contains("days old") && stderr(&output).contains("godspeed-cli refresh"), "{}", stderr(&output));
+    assert_eq!(ids_in_json(&output), vec!["t3"]);
+}
+
+#[test]
+fn a_fresh_copy_produces_no_age_note() {
+    let sandbox = refreshed("search-fresh", false);
+
+    let output = search(&sandbox, &["milk"]);
+
+    assert!(!stderr(&output).contains("old"), "{}", stderr(&output));
+}
+
+#[test]
+fn search_help_documents_the_syntax_and_needs_nothing() {
+    let sandbox = Sandbox::new("search-help");
+
+    let output = search(&sandbox, &["--help"]);
+
+    assert_eq!(code(&output), 0);
+    let text = stdout(&output);
+    for needle in ["MATCHING:", "DATES", "has:due-time", "group:FIELD", "EXIT STATUS"] {
+        assert!(text.contains(needle), "{needle}");
+    }
+}
+
+#[test]
+fn a_task_can_still_be_created_whose_text_starts_with_search() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("create-search-task");
+
+    sandbox.run(&api, &["add", "search", "the", "attic"]);
+    sandbox.run(&api, &["search the garage"]);
+
+    let titles: Vec<String> = api.posted_tasks().iter().map(|t| t["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(titles, vec!["search the attic", "search the garage"]);
 }

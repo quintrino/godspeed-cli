@@ -1,11 +1,15 @@
 mod api;
 mod capture;
+mod eval;
 mod exit;
 mod names;
 mod notify;
 mod paths;
+mod present;
 mod queue;
+mod query;
 mod refresh;
+mod search;
 mod store;
 mod task;
 mod token;
@@ -19,6 +23,7 @@ USAGE:
     godspeed-cli [add] [--] <TASK>...
     echo "<TASK>" | godspeed-cli
     godspeed-cli refresh [--include-completed] [--json]
+    godspeed-cli search [--json] [QUERY]...
     godspeed-cli --help | --version
 
 COMMANDS:
@@ -27,6 +32,8 @@ COMMANDS:
               Incomplete tasks only, unless --include-completed is given. Replaces the
               previous copy, and keeps it if the download fails. --json prints the counts as
               JSON. The API limits reads, so a large account can take several minutes.
+    search    Search the local copy made by `refresh`, offline. Run
+              `godspeed-cli search --help` for the query syntax.
 
     A first argument of exactly `add`, `refresh` or `search` is a command. To create a task
     whose text starts with one of those words, write `add search the attic` or quote the
@@ -63,6 +70,93 @@ EXIT STATUS:
          cached, because retrying wouldn't help.
 "#;
 
+const SEARCH_HELP: &str = r#"Search the local copy of your tasks made by `godspeed-cli refresh`. Works offline.
+
+USAGE:
+    godspeed-cli search [--json] [QUERY]...
+
+By default only incomplete tasks are searched. Add is:complete to include completed ones
+(they are only there if you refreshed with --include-completed). With no query, every
+incomplete task is listed. The words of the query are joined with spaces, so quote the whole
+query when it contains characters the shell would use, such as ( ) | & ! < > "
+
+EXAMPLES:
+    godspeed-cli search invoice
+    godspeed-cli search 'due:20261031 label:Low'
+    godspeed-cli search 'is:complete label:Low sort-desc:created'
+    godspeed-cli search 'title:"tax return" list:Admin'
+    godspeed-cli search '(label:Low | label:Medium) due<=2026-10-31'
+    godspeed-cli search 'has:notes duration>=30m group:list sort-desc:due limit:20'
+
+MATCHING:
+    word                 Case-insensitive; found anywhere in the title, notes or attachment names
+    "exact phrase"       The phrase, found anywhere in the same text
+    a b                  Both (a space means AND), as does a & b
+    a | b                Either
+    !a  or  -a           Not a
+    ( ... )              Grouping. | binds loosest, then AND, then !
+    Anything else that looks like operator:value but isn't an operator below is a plain word.
+
+FIELDS (case-insensitive, matched anywhere in the value; quote values with spaces):
+    title:VALUE  notes:VALUE  attachment:VALUE
+    list:VALUE           The list's name
+    folder:VALUE         The list's path, or its name if it has none (in:VALUE is the same)
+    label:VALUE          A label's name
+    label-group:VALUE    The group a label belongs to
+
+DATES (due, first-due, snoozed, start, created):
+    due:DATE             On that date. due=DATE is the same
+    due<DATE  due<=DATE  due>DATE  due>=DATE
+    due is the later of the due date and the snooze date; first-due ignores snoozes.
+    A task without that date never matches a date test (so !due:today does match it).
+    DATE is today, tomorrow, yesterday, YYYYMMDD, YYYY-MM-DD, or relative: 3d, -2d, 2w, 24h
+    (hours are rounded down to whole days). After : or = you can also use the periods
+    week, next-week, month and year (weeks run Monday to Sunday).
+
+NUMBERS:
+    duration<30m  duration>=1.5h  duration:45     Minutes, or with an m or h suffix
+    snooze-count=2  indent-level>0
+    <  <=  >  >=  =  (or : for =). A task without the value never matches.
+
+TRAITS:
+    has:notes  has:attachment  has:label  has:repeat  has:due  has:snooze  has:start
+    has:due-time  has:start-time  has:bookmark  has:email  has:duration
+    has:any              Has at least one of the traits above (not counting the two time ones)
+
+STATES:
+    is:complete          Completed tasks; adds them to the search
+    is:available         No start date or snooze still in the future
+    is:uncleared         Completed but not yet cleared
+
+PRESENTATION:
+    sort:FIELD  sort-asc:FIELD  sort-desc:FIELD     Repeat to sort by several fields in turn
+        FIELD is title, list, label, due, first-due, snoozed, start, created, updated,
+        duration, snooze-count or indent-level. Tasks without a value come last.
+        Put names first with a priority list: sort:label:High|Medium|Low
+    group:FIELD          list, label, due, first-due, snoozed, start or created
+        group:list:Work|Home puts those groups first. A task with several labels is
+        shown under one, unless enable:duplicates is given.
+    limit:N              At most N tasks, after sorting
+    enable:duplicates  disable:duplicates
+    enable:nested and disable:nested are not supported and are rejected.
+
+OPTIONS:
+    --json               Print the tasks as JSON (the full records, plus list_names and
+                         label_names), or as {"group", "tasks"} objects when grouping. The
+                         table shows the title (80 characters), list (12), due date and
+                         labels (20), cut short with an ellipsis if longer.
+    --                   End the options, so the query can contain --json.
+    -h, --help           Print this help.
+
+EXIT STATUS:
+    0    The search ran (even if nothing matched).
+    1    The local copy couldn't be read.
+    2    The query is invalid, or `refresh` hasn't been run yet.
+
+Messages ("No matching tasks.", a note that the copy is old) go to stderr, so stdout holds
+only the results.
+"#;
+
 /// What the command line is asking for. Only the first argument is checked, so a task like
 /// "fix the --version bug" is still a task.
 #[derive(Debug, PartialEq, Eq)]
@@ -73,6 +167,7 @@ enum Invocation {
     Add(Vec<String>),
     Refresh(Vec<String>),
     Search(Vec<String>),
+    SearchHelp,
 }
 
 fn parse_invocation(args: &[String]) -> Invocation {
@@ -94,14 +189,12 @@ fn parse_invocation(args: &[String]) -> Invocation {
             Some("-h" | "--help") => Invocation::Help,
             _ => Invocation::Refresh(rest.to_vec()),
         },
-        "search" => Invocation::Search(rest.to_vec()),
+        "search" => match rest.first().map(String::as_str) {
+            Some("-h" | "--help") => Invocation::SearchHelp,
+            _ => Invocation::Search(rest.to_vec()),
+        },
         _ => Invocation::Add(args.to_vec()),
     }
-}
-
-fn not_available(command: &str) -> ExitCode {
-    eprintln!("Error: `{command}` isn't available in this version yet");
-    exit::usage()
 }
 
 fn main() -> ExitCode {
@@ -117,7 +210,11 @@ fn main() -> ExitCode {
         }
         Invocation::Add(task_args) => capture::run_add(&task_args),
         Invocation::Refresh(refresh_args) => refresh::run_refresh(&refresh_args),
-        Invocation::Search(_) => not_available("search"),
+        Invocation::Search(search_args) => search::run_search(&search_args),
+        Invocation::SearchHelp => {
+            print!("godspeed-cli {}\n{SEARCH_HELP}", env!("CARGO_PKG_VERSION"));
+            exit::SUCCESS
+        }
     }
 }
 
@@ -236,10 +333,35 @@ mod tests {
     }
 
     #[test]
+    fn search_help_is_available_and_the_search_command_still_takes_a_query() {
+        assert_eq!(parse_invocation(&args(&["search", "--help"])), Invocation::SearchHelp);
+        assert_eq!(parse_invocation(&args(&["search", "-h"])), Invocation::SearchHelp);
+        assert_eq!(
+            parse_invocation(&args(&["search", "-label:Low", "--json"])),
+            Invocation::Search(args(&["-label:Low", "--json"]))
+        );
+    }
+
+    #[test]
+    fn the_search_help_documents_every_operator() {
+        for text in [
+            "title:VALUE", "notes:VALUE", "attachment:VALUE", "list:VALUE", "folder:VALUE", "in:VALUE",
+            "label:VALUE", "label-group:VALUE", "due:DATE", "due<=DATE", "first-due", "snoozed", "start", "created",
+            "duration<30m", "snooze-count=2", "indent-level>0", "has:notes", "has:attachment", "has:label",
+            "has:repeat", "has:due", "has:snooze", "has:start", "has:due-time", "has:start-time", "has:bookmark",
+            "has:email", "has:duration", "has:any", "is:complete", "is:available", "is:uncleared", "sort:FIELD",
+            "sort-asc:FIELD", "sort-desc:FIELD", "group:FIELD", "limit:N", "enable:duplicates", "disable:duplicates",
+            "enable:nested", "--json", "EXIT STATUS", "next-week", "sort:label:High|Medium|Low", "group:list:Work|Home",
+        ] {
+            assert!(SEARCH_HELP.contains(text), "{text} is not in the search help");
+        }
+    }
+
+    #[test]
     fn the_help_text_covers_the_options_and_the_task_syntax() {
         for text in [
             "--help", "--version", "--", "GODSPEED_TOKEN", ".label", "@list", "~duration", ":date", "n: text",
-            "add", "EXIT STATUS", "search the attic", "refresh", "--include-completed",
+            "add", "EXIT STATUS", "search the attic", "refresh", "--include-completed", "search [--json]",
         ] {
             assert!(HELP.contains(text), "{text} is not in the help");
         }
