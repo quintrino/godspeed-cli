@@ -52,6 +52,22 @@ godspeed-cli "Buy groceries and cook dinner"
 echo "Buy groceries and cook dinner" | godspeed-cli
 ```
 
+### Commands
+
+| Command | |
+| --- | --- |
+| `add` | Create a task. This is the default, so `godspeed-cli "Buy milk"` and `godspeed-cli add "Buy milk"` are the same. |
+| `refresh` | Reserved for downloading your tasks (coming in a later release). |
+| `search` | Reserved for searching your tasks (coming in a later release). |
+
+A command is recognised only when it is the **whole first argument**, in lowercase. So `godspeed-cli "search the attic"` (quoted) and `godspeed-cli buy add milk` still create tasks. If you type the words unquoted, `godspeed-cli search the attic` runs the `search` command instead. To create a task whose text starts with a command word, quote it, put `add` in front, or use `--`:
+
+```bash
+godspeed-cli "search the attic"
+godspeed-cli add search the attic
+godspeed-cli -- search the attic
+```
+
 ### Options
 
 | Option | |
@@ -61,6 +77,16 @@ echo "Buy groceries and cook dinner" | godspeed-cli
 | `--` | Treat everything after it as the task, for a task that starts with `-h`, `--help`, `-V` or `--version`. |
 
 These are only recognised as the first argument, so `godspeed-cli "fix the --version bug"` still creates a task. `--help` and `--version` don't need `GODSPEED_TOKEN` and never create a task.
+
+### Exit status
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success. |
+| `1` | Something failed, such as the API being unreachable or refusing the request. A task that couldn't be sent is queued and retried (see [Offline Cache](#offline-cache)). |
+| `2` | The input can't be used: no token, an invalid task, or a bad query. Nothing is queued, because retrying wouldn't help. |
+
+Use this in scripts: `godspeed-cli "..." || echo "not created"`.
 
 ## Special Syntax
 
@@ -85,7 +111,9 @@ godspeed-cli "Call dentist @Personal"
 # Adds to your "Personal" list
 ```
 
-**Note**: Only one list can be specified per task. If multiple lists are detected, you'll receive an error notification.
+**Note**: Only one list can be specified per task. If more than one `@list` is found, the task is rejected with an error (exit status 2) and nothing is sent or queued. `@` words after `n:` are part of the notes and don't count.
+
+A task needs a title: one made only of `.label`, `@list`, `~duration` and `:date` words is rejected the same way.
 
 ### Duration with `~`
 Set the task duration with `~` followed by a number, in minutes (`~45`, `~45m`) or hours (`~2h`, `~1.5h`). Fractions are rounded to whole minutes.
@@ -170,6 +198,8 @@ If the API is unreachable or a request fails, the task is automatically cached l
 
 This ensures you never lose tasks due to connectivity issues.
 
+Only tasks that failed because of the connection or the API are queued. A task that can never be sent, such as one with several lists or no title, is rejected immediately and is not queued. If an earlier version left one of those in the queue, it is dropped on the next run and its text is printed so you can recreate it.
+
 Cache location: `$XDG_DATA_HOME/godspeed-cli/cache` (usually `~/.local/share/godspeed-cli/cache`)
 
 ## List Caching
@@ -186,7 +216,8 @@ The CLI uses macOS notifications (via `osascript`) to alert you of errors:
 
 - **"GODSPEED_TOKEN is not set"**: You need to set your API key (environment variable or token file)
 - **"Failed to send task"**: The API request failed (task is cached for retry)
-- **"Error: Multiple lists specified"**: You used more than one `@list` in a single task
+- **"Error: Multiple lists specified"**: You used more than one `@list` in a single task (not queued)
+- **"Error: The task has no title"**: The task was only syntax words such as `@list` (not queued)
 
 ## Tips and Tricks
 

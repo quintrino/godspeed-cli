@@ -128,6 +128,14 @@ impl Sandbox {
         fs::write(path, text).unwrap();
     }
 
+    /// Pre-fills the retry queue, as an earlier failed run would have.
+    fn write_queue(&self, tasks: &[&str]) {
+        let path = self.cache_file();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text: String = tasks.iter().map(|t| format!("{t}\n{CACHE_DIVIDER}\n")).collect();
+        fs::write(path, text).unwrap();
+    }
+
     fn cache_file(&self) -> PathBuf {
         self.data_home.join("godspeed-cli/cache")
     }
@@ -443,14 +451,166 @@ fn help_and_version_need_no_token_and_send_nothing() {
     assert!(api.requests().is_empty());
 }
 
+fn code(output: &Output) -> i32 {
+    output.status.code().expect("the process exited normally")
+}
+
 #[test]
-fn more_than_one_list_is_rejected_without_creating_a_task() {
+fn more_than_one_list_is_rejected_without_contacting_the_api_or_queueing() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("two-lists");
 
     let output = sandbox.run(&api, &["Confused task @work @home"]);
 
     assert!(stderr(&output).contains("Multiple lists"), "{}", stderr(&output));
+    assert_eq!(code(&output), 2);
+    assert!(api.requests().is_empty());
+    assert!(sandbox.queued_tasks().is_empty(), "{}", sandbox.cache_contents());
+}
+
+#[test]
+fn a_task_with_no_title_is_rejected_without_contacting_the_api_or_queueing() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("no-title");
+
+    let output = sandbox.run(&api, &["@work .urgent ~10m :tomorrow n: only notes"]);
+
+    assert!(stderr(&output).contains("no title"), "{}", stderr(&output));
+    assert_eq!(code(&output), 2);
+    assert!(api.requests().is_empty());
+    assert!(sandbox.queued_tasks().is_empty());
+}
+
+#[test]
+fn at_signs_in_the_notes_do_not_count_as_lists() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("at-in-notes");
+
+    let output = sandbox.run(&api, &["Call bank @home n: ask @bob and @alice about fees"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let task = &api.posted_tasks()[0];
+    assert_eq!(task["list_id"], "list-home");
+    assert_eq!(task["notes"], "ask @bob and @alice about fees");
+}
+
+#[test]
+fn exit_codes_distinguish_success_failure_and_unusable_input() {
+    let sandbox = Sandbox::new("exit-codes");
+    let up = MockApi::start(200);
+    let down = MockApi::start(500);
+
+    let sent = sandbox.run(&up, &["Fine task"]);
+    let rejected_by_api = sandbox.run(&down, &["Another task"]);
+    let unreachable = sandbox.run_with(Some("http://127.0.0.1:1"), Some("t"), &["Third task"], None);
+    let no_token = sandbox.run_with(Some(&up.url), None, &["Fourth task"], None);
+    let invalid = sandbox.run(&up, &["@work"]);
+    let help = sandbox.run_with(None, None, &["--help"], None);
+    let version = sandbox.run_with(None, None, &["--version"], None);
+
+    assert_eq!(code(&sent), 0);
+    assert_eq!(code(&rejected_by_api), 1);
+    assert_eq!(code(&unreachable), 1);
+    assert_eq!(code(&no_token), 2);
+    assert_eq!(code(&invalid), 2);
+    assert_eq!(code(&help), 0);
+    assert_eq!(code(&version), 0);
+}
+
+#[test]
+fn running_with_nothing_to_send_succeeds_and_sends_nothing() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("empty-stdin");
+
+    let output = sandbox.run_stdin(&api, &[], "");
+
+    assert_eq!(code(&output), 0);
+    assert!(api.requests().is_empty());
+}
+
+#[test]
+fn queued_tasks_that_can_never_be_sent_are_dropped_and_shown() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("stuck-queue");
+    sandbox.write_queue(&["Stuck @work @home", "Valid queued task @home", "@work .urgent"]);
+
+    let output = sandbox.run(&api, &["New task"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let titles: Vec<String> = api.posted_tasks().iter().map(|t| t["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(titles, vec!["Valid queued task", "New task"]);
+    let message = stderr(&output);
+    assert!(message.contains("Stuck @work @home"), "{message}");
+    assert!(message.contains("Multiple lists"), "{message}");
+    assert!(message.contains("no title"), "{message}");
+    assert!(sandbox.queued_tasks().is_empty(), "{}", sandbox.cache_contents());
+}
+
+#[test]
+fn a_queued_task_that_is_only_failing_to_send_is_kept() {
+    let sandbox = Sandbox::new("kept-queue");
+    sandbox.write_queue(&["Waiting task"]);
+    let down = MockApi::start(500);
+
+    sandbox.run(&down, &["Another"]);
+
+    assert_eq!(sandbox.queued_tasks(), vec!["Waiting task", "Another"]);
+}
+
+#[test]
+fn add_is_an_explicit_spelling_of_the_default_command() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-command");
+
+    let output = sandbox.run(&api, &["add", "Buy", "milk", "@home", "~10m"]);
+    let stdin_output = sandbox.run_stdin(&api, &["add"], "Read mail @work");
+
+    assert_eq!(code(&output), 0);
+    assert_eq!(code(&stdin_output), 0);
+    let tasks = api.posted_tasks();
+    assert_eq!(tasks[0]["title"], "Buy milk");
+    assert_eq!(tasks[0]["list_id"], "list-home");
+    assert_eq!(tasks[1]["title"], "Read mail");
+}
+
+#[test]
+fn add_help_prints_the_help_and_does_not_create_a_task() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-help");
+
+    let output = sandbox.run_with(Some(&api.url), None, &["add", "--help"], None);
+
+    assert_eq!(code(&output), 0);
+    assert!(stdout(&output).contains("TASK SYNTAX"));
+    assert!(api.requests().is_empty());
+}
+
+#[test]
+fn a_task_starting_with_a_command_word_is_created_with_add_double_dash_or_quotes() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("command-word-tasks");
+
+    sandbox.run(&api, &["add", "search", "the", "attic"]);
+    sandbox.run(&api, &["--", "refresh", "the", "roof"]);
+    sandbox.run(&api, &["search the garage"]);
+    sandbox.run(&api, &["add", "--", "--version", "bump"]);
+    sandbox.run(&api, &["buy", "add", "milk"]);
+
+    let titles: Vec<String> = api.posted_tasks().iter().map(|t| t["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(
+        titles,
+        vec!["search the attic", "refresh the roof", "search the garage", "--version bump", "buy add milk"]
+    );
+}
+
+#[test]
+fn an_unquoted_command_word_runs_the_command_and_creates_no_task() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("command-word-runs");
+
+    let output = sandbox.run(&api, &["refresh"]);
+
+    assert_eq!(code(&output), 2);
     assert_eq!(api.count("POST", "/tasks"), 0);
 }
 
