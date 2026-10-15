@@ -44,6 +44,16 @@ godspeed-cli "Buy groceries and cook dinner"
 echo "Buy groceries and cook dinner" | godspeed-cli
 ```
 
+### Options
+
+| Option | |
+| --- | --- |
+| `-h`, `--help` | Print the usage and task syntax, then exit. |
+| `-V`, `--version` | Print the version, then exit. |
+| `--` | Treat everything after it as the task, for a task that starts with `-h`, `--help`, `-V` or `--version`. |
+
+These are only recognised as the first argument, so `godspeed-cli "fix the --version bug"` still creates a task. `--help` and `--version` don't need `GODSPEED_TOKEN` and never create a task.
+
 ## Special Syntax
 
 ### Labels with `.`
@@ -58,7 +68,7 @@ godspeed-cli "Review pull request .Urgent .Work"
 ```
 
 ### Lists with `@`
-Specify which list to add the task to using `@ListName`. The list name will be matched case-insensitively against your Godspeed lists.
+Specify which list to add the task to using `@ListName`. The list name will be matched case-insensitively against your Godspeed lists, trying an exact match first, then a prefix, then any part of the name, then any part of the name ignoring spaces, slashes and dashes (so `@sideproj` finds "Side Projects"). If several lists match at the same level, the shortest name wins.
 
 #NOTE: Because of Shell limitations, this only works with single word lists
 
@@ -69,14 +79,41 @@ godspeed-cli "Call dentist @Personal"
 
 **Note**: Only one list can be specified per task. If multiple lists are detected, you'll receive an error notification.
 
-### Duration with `:`
-Set the task duration in minutes using `:` followed by a number.
+### Duration with `~`
+Set the task duration with `~` followed by a number, in minutes (`~45`, `~45m`) or hours (`~2h`, `~1.5h`). Fractions are rounded to whole minutes.
 
 ```bash
-godspeed-cli "Workout session :45"
+godspeed-cli "Workout session ~45m"
 # Title: "Workout session"
 # Duration: 45 minutes
 ```
+
+Only `~` followed by a positive number and an optional `m` or `h` counts as a duration, so a word like `~roughly` stays in the title.
+
+The original `:45` form (minutes) still works.
+
+**Quote the task.** An unquoted `~` can be expanded by the shell (zsh may report "no such user or named directory"). Quote the whole task, or escape it as `\~45m`.
+
+### Due date with `:`
+Set the due date with `:` followed by a keyword or a date. The date has no time of day.
+
+| Syntax | Due date |
+| --- | --- |
+| `:today` | Today |
+| `:tomorrow` | Tomorrow |
+| `:next-week` | Seven days from today |
+| `:20261031` | 31 October 2026 |
+| `:2026-10-31` | 31 October 2026 |
+
+```bash
+godspeed-cli "Send invoice :tomorrow"
+# Title: "Send invoice"
+# Due: tomorrow's date
+```
+
+`:` followed by a short number such as `:45` is a duration in minutes, not a date. A value that isn't a valid date stays in the title.
+
+If a task with a relative date (`:today`, `:tomorrow`, `:next-week`) can't be sent and is queued offline, the date is saved as an absolute date, so it is still correct when the task is retried on a later day.
 
 ### Notes with `n:`
 Add detailed notes to your task using `n:` followed by the note content. Everything after `n:` becomes the note.
@@ -92,7 +129,7 @@ godspeed-cli "Buy ingredients n: Need milk, eggs, flour, and butter for baking"
 You can combine all special syntax in a single task:
 
 ```bash
-godspeed-cli "Write blog post @Work .Writing :120 n: Focus on the new API features and include code examples"
+godspeed-cli "Write blog post @Work .Writing ~2h :tomorrow n: Focus on the new API features and include code examples"
 ```
 
 This creates a task with:
@@ -100,6 +137,7 @@ This creates a task with:
 - List: Your "Work" list
 - Labels: ["Writing"]
 - Duration: 120 minutes
+- Due date: tomorrow
 - Notes: "Focus on the new API features and include code examples"
 
 ## Multi-line Tasks
@@ -243,3 +281,11 @@ echo "Research new framework
 - Write summary
 .Development @Learning :180" | godspeed-cli
 ````
+
+## Development
+
+```bash
+cargo test
+```
+
+The unit tests cover the parsing. `tests/cli.rs` runs the real binary against a mock API on localhost, with its own data directory, by setting `GODSPEED_API_URL` (default `https://api.godspeedapp.com`). The token is sent to whatever that variable names, so leave it unset in normal use.
