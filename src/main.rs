@@ -14,6 +14,7 @@ mod listing;
 mod names;
 mod notify;
 mod paths;
+mod pending;
 mod present;
 mod queue;
 mod query;

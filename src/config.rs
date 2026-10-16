@@ -73,8 +73,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
     if let Some(unknown) = table.keys().find(|key| !KNOWN_KEYS.contains(&key.as_str())) {
         return Err(format!("unknown setting '{unknown}' (the settings are: {})", KNOWN_KEYS.join(", ")));
     }
-    let mut config = Config::default();
-    config.max_age = age_setting(&table, "max_age")?;
+    let mut config = Config { max_age: age_setting(&table, "max_age")?, ..Config::default() };
     if let Some(age) = age_setting(&table, "full_refresh_after")? {
         config.full_refresh_after = age;
     }

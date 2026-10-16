@@ -65,7 +65,7 @@ echo "Buy groceries and cook dinner" | godspeed-cli add
 | Command | |
 | --- | --- |
 | `add` | Create a task. `add --json` also prints the API's response. See [add --json](#add---json). |
-| `edit` | Edit, complete, snooze, delete or move a task, by id. See [Edit](#edit). |
+| `edit` | Edit, complete, snooze, set the due date, duration or labels of, delete or move a task, by id, or many ids piped in. See [Edit](#edit). |
 | `lists`, `labels` | Show your lists or labels, or those matching a string. See [Lists and labels](#lists-and-labels). |
 | `refresh` | Keep a local copy of your tasks, lists and labels. See [Refresh](#refresh). |
 | `search` | Search the local copy made by `refresh`, offline. See [Search](#search). |
@@ -474,15 +474,16 @@ The names come from Godspeed when there is a token. Without a token, or if Godsp
 
 ## Task ids
 
-`search --id` adds an `ID` column to the table (JSON always has the id), and `lists --id` and `labels --id` do the same for lists and labels. A task's id is what `edit` takes.
+`search --id` adds an `ID` column to the table (JSON always has the id), and `lists --id` and `labels --id` do the same for lists and labels. `--ids-only` prints just the ids, one per line, in the order the table would show them, with nothing else, to pipe into other commands (it can't be combined with `--json`). A task's id is what `edit` takes.
 
 ```bash
 godspeed-cli search --id 'due:today'
+godspeed-cli search --ids-only 'due:today'
 ```
 
 ## Edit
 
-`godspeed-cli edit` changes a task: edit its title or notes, complete it, snooze it, delete it, or move it to another list. The task is its id, or words from its title (looked up in the local copy; if several match you choose one).
+`godspeed-cli edit` changes a task: its title, notes, due date, duration, labels, list or snooze; completes it; or deletes it. The task is its id, or words from its title (looked up in the local copy; if several match you choose one).
 
 ```bash
 godspeed-cli edit 5a1b2c3d             # a menu asks what to do
@@ -490,6 +491,8 @@ godspeed-cli edit "buy milk"           # the same, found by title
 godspeed-cli edit 5a1b2c3d --complete
 godspeed-cli edit 5a1b2c3d --snooze tomorrow
 godspeed-cli edit 5a1b2c3d --title "Buy oat milk" --move home
+godspeed-cli edit 5a1b2c3d --due "friday 5pm" --duration 45m
+godspeed-cli edit 5a1b2c3d --add-label Urgent --remove-label Low
 godspeed-cli edit 5a1b2c3d --delete --yes
 ```
 
@@ -503,6 +506,9 @@ Buy milk  [Home]  due 2026-10-20  id 5a1b2c3d
   4) Snooze
   5) Delete
   6) Move to another list
+  7) Set the due date
+  8) Set the duration
+  9) Add or remove labels
   q) Quit
 ```
 
@@ -512,11 +518,33 @@ With options, they're done at once, which suits scripts:
 | --- | --- |
 | `--title TEXT`, `--notes TEXT` | Change the title or notes (`--notes ""` clears them). |
 | `--complete`, `--incomplete` | Complete the task, or reopen a completed one. |
-| `--snooze WHEN` | Snooze until `tomorrow`, `friday`, `"friday 9am"`, `3h`, `2026-10-31` or `20261031`. A day with no time snoozes for the whole day (`timeless_snoozed_until`), otherwise it's a moment (`snoozed_until`). A time in the past is refused. |
+| `--due WHEN` | Set the due date: `tomorrow`, `friday`, `"friday 5pm"`, `"in 2 days"`, `2026-10-31` or `20261031`. A day with no time is a due date with no time. It may be in the past. |
+| `--duration LENGTH` | Set the duration: `45` (minutes), `45m`, `1.5h`. |
+| `--add-label NAME`, `--remove-label NAME` | Add or remove a label. Repeat for several. Names are matched like `.label` in `add`: exactly, or by their start, ignoring case. An unknown label is an error that lists the labels. |
+| `--snooze WHEN` | Snooze until `WHEN`, written as for `--due`. A day with no time snoozes for the whole day (`timeless_snoozed_until`), otherwise it's a moment (`snoozed_until`). A time in the past is refused. |
 | `--move LIST` | Move to a list, matched as `@list` is in `add`. |
 | `--delete` | Delete the task, after asking `[y/N]`. `--yes` (`-y`) skips the question. It can't be undone, and can't be combined with other options. |
+| `--json` | Print what happened to each task as JSON: `id`, `title`, `action`, `status` (`done`, `queued` or `failed`) and `error`. |
 
-These use `PATCH /tasks/:id` and `DELETE /tasks/:id`, sending only the fields that change. The local copy is updated as well, so `search` sees the change at once; the next `refresh` brings in Godspeed's own version. An id that isn't in the local copy is still tried. Exit status: `0` done, `1` Godspeed couldn't be reached or refused, `2` the input can't be used (no token, no such task or list, an unreadable date).
+These use `PATCH /tasks/:id` and `DELETE /tasks/:id`, sending only the fields that change. The local copy is updated as well, so `search` sees the change at once; the next `refresh` brings in Godspeed's own version. An id that isn't in the local copy is still tried.
+
+### Editing many tasks
+
+With options and no task, `edit` reads task ids from stdin, one on each line, and makes the same change to each:
+
+```bash
+godspeed-cli search 'due<today' --ids-only | godspeed-cli edit --snooze tomorrow
+godspeed-cli search 'label:Low' --ids-only | godspeed-cli edit --complete
+godspeed-cli search 'list:Someday' --ids-only | godspeed-cli edit --delete --yes
+```
+
+`edit -` says the same explicitly. A line that isn't an id (such as a title) is an error, and nothing is sent. Deleting this way needs `--yes`. Each task is sent on its own, so one failing doesn't stop the others; a summary (`3 done, 1 queued, 0 failed.`) goes to stderr, and the exit status is `1` if any didn't go through.
+
+### When Godspeed can't be reached
+
+A change that can't be sent because Godspeed is unreachable or failing (a connection error, or a status of 5xx, 429 or 408) is saved in the [retry queue](#offline-cache) and the local copy is updated anyway. The next `add` or `edit` sends what is waiting first, in the order it was saved, so an older change can't overwrite a newer one; if a change to a task fails again, later changes to that task wait too. A change Godspeed *refuses* (such as a 404 for a task that no longer exists) is reported and not saved, and one that is refused after being saved is dropped with a message. Lists and labels are looked up in the local copy (and the names `add` has cached) first, and Godspeed is asked only if they aren't there.
+
+Exit status: `0` done, `1` Godspeed couldn't be reached (and the change is saved) or refused it, `2` the input can't be used (no token, no such task, list or label, an unreadable date or duration).
 
 ## Debugging
 
@@ -562,17 +590,17 @@ Notes:
 
 ## Offline Cache
 
-If the API is unreachable or a request fails, the task is automatically cached locally. The next time you run `add` (for any task), it will:
+If the API is unreachable or a request fails, the task is automatically cached locally. So is an `edit` that couldn't be sent (see [When Godspeed can't be reached](#when-godspeed-cant-be-reached)). The next time you run `add` or `edit` (for any task), it will:
 
-1. Attempt to send all cached tasks first
-2. Remove successfully sent tasks from the cache
-3. Process your new task
+1. Attempt to send everything cached, in the order it was cached
+2. Remove what was sent from the cache
+3. Process your new task or change
 
-This ensures you never lose tasks due to connectivity issues.
+This ensures you never lose tasks or changes due to connectivity issues.
 
 Only tasks that failed because of the connection or the API are queued. A task that can never be sent, such as one with several lists or no title, is rejected immediately and is not queued. If an earlier version left one of those in the queue, it is dropped on the next run and its text is printed so you can recreate it.
 
-Cache location: `$XDG_DATA_HOME/godspeed-cli/cache` (usually `~/.local/share/godspeed-cli/cache`)
+Cache location: `$XDG_DATA_HOME/godspeed-cli/cache` (usually `~/.local/share/godspeed-cli/cache`). A waiting task is its text; a waiting change from `edit` is one line of JSON starting `{"queued_edit":`, with the names already turned into ids and the dates into absolute ones.
 
 ## List Caching
 

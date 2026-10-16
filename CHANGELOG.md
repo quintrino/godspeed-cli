@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.13.0: 2026-10-16
+
+### Added
+
+- **`edit` can set the due date and duration**: `--due WHEN` (`tomorrow`, `"friday 5pm"`, `2026-10-31`) and `--duration LENGTH` (`45`, `45m`, `1.5h`). The menu has them too.
+- **`edit` can change labels**: `--add-label NAME` and `--remove-label NAME`, each repeatable, matched like `.label` in `add`. An unknown label is an error that lists your labels.
+- **Edit many tasks at once**: with options and no task, `edit` reads ids from stdin, one per line, so `godspeed-cli search 'due:today' --ids-only | godspeed-cli edit --complete` works. A line that isn't an id is refused, deleting this way needs `--yes`, and a summary is printed.
+- **`--ids-only`** on `search`, `lists` and `labels` prints just the ids, one per line, in result order.
+- **`edit --json`** prints what happened to each task (`done`, `queued` or `failed`).
+- **Changes are queued when Godspeed can't be reached.** An `edit` that fails because of the connection or a 5xx, 429 or 408 is saved in the retry queue, and the local copy is updated anyway. Every `add` and `edit` now sends what is waiting first, in order, so an older change can't overwrite a newer one. A change Godspeed refuses (such as a 404) isn't queued, and a queued one that is refused later is dropped with a message.
+
+### Changed
+
+- `edit` looks up lists and labels in the local copy before asking Godspeed.
+- Tasks piped to `edit` are one id per line; ids on the same line are refused.
+
+### Fixed
+
+- The clippy warnings in the existing code.
+
 ## 0.12.0: 2026-10-16
 
 ### Added

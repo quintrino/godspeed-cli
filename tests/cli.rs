@@ -38,6 +38,8 @@ struct MockApi {
     url: String,
     requests: Arc<Mutex<Vec<Recorded>>>,
     task_replies: Arc<Mutex<VecDeque<Reply>>>,
+    /// The status returned for `PATCH` and `DELETE` of a task.
+    change_status: Arc<Mutex<u16>>,
 }
 
 impl MockApi {
@@ -47,16 +49,24 @@ impl MockApi {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let task_replies = Arc::new(Mutex::new(VecDeque::new()));
+        let change_status = Arc::new(Mutex::new(200u16));
         let recorded = Arc::clone(&requests);
         let replies = Arc::clone(&task_replies);
+        let changes = Arc::clone(&change_status);
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let recorded = Arc::clone(&recorded);
                 let replies = Arc::clone(&replies);
-                thread::spawn(move || serve(stream, &recorded, &replies, post_status));
+                let changes = Arc::clone(&changes);
+                thread::spawn(move || serve(stream, &recorded, &replies, post_status, &changes));
             }
         });
-        MockApi { url, requests, task_replies }
+        MockApi { url, requests, task_replies, change_status }
+    }
+
+    /// From now on, `PATCH` and `DELETE` of a task answer with this status.
+    fn set_change_status(&self, status: u16) {
+        *self.change_status.lock().unwrap() = status;
     }
 
     /// The next `GET /tasks` answers with this page; with none queued it answers 404.
@@ -104,7 +114,13 @@ impl MockApi {
     }
 }
 
-fn serve(stream: TcpStream, recorded: &Mutex<Vec<Recorded>>, replies: &Mutex<VecDeque<Reply>>, post_status: u16) {
+fn serve(
+    stream: TcpStream,
+    recorded: &Mutex<Vec<Recorded>>,
+    replies: &Mutex<VecDeque<Reply>>,
+    post_status: u16,
+    change_status: &Mutex<u16>,
+) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
@@ -147,7 +163,10 @@ fn serve(stream: TcpStream, recorded: &Mutex<Vec<Recorded>>, replies: &Mutex<Vec
             None => (404, "{}".to_string()),
         },
         ("PATCH" | "DELETE", "/tasks/missing") => (404, r#"{"message":"Task not found"}"#.to_string()),
-        ("PATCH" | "DELETE", p) if p.starts_with("/tasks/") => (200, r#"{"success":true}"#.to_string()),
+        ("PATCH" | "DELETE", p) if p.starts_with("/tasks/") => {
+            let status = *change_status.lock().unwrap();
+            (status, if status == 200 { r#"{"success":true}"#.to_string() } else { "{}".to_string() })
+        }
         ("POST", "/tasks") => (post_status, r#"{"success":true,"todo_item":{"id":"new-task-id","title":"from the mock"}}"#.to_string()),
         _ => (404, "{}".to_string()),
     };
@@ -2230,7 +2249,7 @@ fn bash_completes_commands_flags_and_shell_names() {
         vec!["--full", "--include-completed", "--json"]
     );
     assert_eq!(bash_complete(&sandbox, "godspeed-cli refresh --i", &["godspeed-cli", "refresh", "--i"]), vec!["--include-completed"]);
-    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --", &["godspeed-cli", "search", "--"]), vec!["--json", "--id", "--refresh", "--max-age", "--color", "--debug"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --", &["godspeed-cli", "search", "--"]), vec!["--json", "--id", "--ids-only", "--refresh", "--max-age", "--color", "--debug"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli search --m", &["godspeed-cli", "search", "--m"]), vec!["--max-age"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli add --", &["godspeed-cli", "add", "--"]), vec!["--json"]);
     assert!(bash_complete(&sandbox, "godspeed-cli add --r", &["godspeed-cli", "add", "--r"]).is_empty());
@@ -3544,4 +3563,292 @@ fn the_new_commands_have_their_own_help_and_send_nothing() {
         assert!(stdout(&output).contains(needle), "{}", stdout(&output));
     }
     assert!(api.requests().is_empty());
+}
+
+// ---- edit: labels, due dates, durations, ids from stdin, and the retry queue ----
+
+fn search_json_task(sandbox: &Sandbox, query: &str) -> Value {
+    let found = search(sandbox, &["--json", query]);
+    serde_json::from_str::<Value>(&stdout(&found)).unwrap()[0].clone()
+}
+
+#[test]
+fn edit_adds_and_removes_labels_by_name_and_the_copy_follows() {
+    let (sandbox, api) = sample_copy("edit-labels");
+
+    let output = sandbox.run(&api, &["edit", "t1", "--add-label", "writing", "--remove-label", "urgent"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let body: Value = serde_json::from_str(&requests_with(&api, "PATCH")[0].body).unwrap();
+    assert_eq!(body, json!({"add_label_ids": ["label-writing"], "remove_label_ids": ["label-urgent"]}));
+    assert!(stdout(&output).contains("label Writing added, label Urgent removed"), "{}", stdout(&output));
+    assert_eq!(search_json_task(&sandbox, "rent")["label_ids"], json!(["label-writing"]));
+}
+
+#[test]
+fn edit_with_an_unknown_label_is_refused_and_names_the_labels() {
+    let (sandbox, api) = sample_copy("edit-unknown-label");
+
+    let output = sandbox.run(&api, &["edit", "t1", "--add-label", "nothing-like-it"]);
+
+    assert_eq!(code(&output), 2);
+    assert!(stderr(&output).contains("no label matches 'nothing-like-it'"), "{}", stderr(&output));
+    assert!(stderr(&output).contains("Your labels: Urgent, Writing"), "{}", stderr(&output));
+    assert!(requests_with(&api, "PATCH").is_empty());
+}
+
+#[test]
+fn edit_sets_the_due_date_and_the_duration() {
+    let (sandbox, api) = sample_copy("edit-due-duration");
+
+    let output = sandbox.run(&api, &["edit", "t3", "--due", "2099-01-05", "--duration", "1.5h"]);
+    let timed = sandbox.run(&api, &["edit", "t3", "--due", "2099-01-06 3pm", "--duration", "45"]);
+    let bad = sandbox.run(&api, &["edit", "t3", "--duration", "soon"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let patches = requests_with(&api, "PATCH");
+    assert_eq!(
+        serde_json::from_str::<Value>(&patches[0].body).unwrap(),
+        json!({"timeless_due_at": "2099-01-05", "duration_minutes": 90})
+    );
+    let second: Value = serde_json::from_str(&patches[1].body).unwrap();
+    assert!(second["due_at"].as_str().unwrap().ends_with('Z'), "{second}");
+    assert_eq!(second["duration_minutes"], 45);
+    assert_eq!(code(&timed), 0, "{}", stderr(&timed));
+    assert_eq!(code(&bad), 2);
+    assert!(stderr(&bad).contains("isn't a duration"), "{}", stderr(&bad));
+    let task = search_json_task(&sandbox, "milk");
+    assert_eq!(task["duration_minutes"], 45);
+    assert!(task.get("timeless_due_at").is_none(), "a time replaces the day: {task}");
+}
+
+#[test]
+fn search_ids_only_prints_one_id_per_line_in_result_order() {
+    let sandbox = refreshed("search-ids-only", false);
+
+    let all = search(&sandbox, &["--ids-only"]);
+    let sorted = search(&sandbox, &["--ids-only", "sort:title limit:2"]);
+    let grouped = search(&sandbox, &["--ids-only", "group:list:Home|Work", "sort:title"]);
+    let none = search(&sandbox, &["--ids-only", "zzzzz"]);
+    let both = search(&sandbox, &["--ids-only", "--json"]);
+
+    assert_eq!(lines(&all), vec!["t1", "t2", "t3"]);
+    assert_eq!(lines(&sorted), vec!["t3", "t1"]);
+    assert_eq!(lines(&grouped), vec!["t3", "t1", "t2"]);
+    assert!(stdout(&none).is_empty());
+    assert_eq!(code(&both), 2);
+}
+
+#[test]
+fn lists_and_labels_have_ids_only_too() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("names-ids-only");
+
+    let lists = sandbox.run(&api, &["lists", "--ids-only"]);
+    let labels = sandbox.run(&api, &["labels", "--ids-only", "writ"]);
+
+    assert_eq!(lines(&lists), vec!["list-work", "list-home"]);
+    assert_eq!(lines(&labels), vec!["label-writing"]);
+}
+
+#[test]
+fn ids_piped_from_search_are_all_edited() {
+    let (sandbox, api) = sample_copy("edit-bulk");
+    let ids = stdout(&search(&sandbox, &["--ids-only", "list:Home"]));
+
+    let output = sandbox.run_stdin(&api, &["edit", "--complete", "--add-label", "writing"], &ids);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let patches = requests_with(&api, "PATCH");
+    assert_eq!(patches.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), vec!["/tasks/t1", "/tasks/t3"]);
+    for patch in &patches {
+        assert_eq!(
+            serde_json::from_str::<Value>(&patch.body).unwrap(),
+            json!({"is_complete": true, "add_label_ids": ["label-writing"]})
+        );
+    }
+    assert_eq!(lines(&output).len(), 2, "{}", stdout(&output));
+    assert!(stderr(&output).contains("2 done, 0 queued, 0 failed."), "{}", stderr(&output));
+    assert!(ids_in_json(&search(&sandbox, &["--json", "list:Home"])).is_empty());
+}
+
+#[test]
+fn a_dash_names_stdin_and_bulk_edits_need_something_to_do_and_real_ids() {
+    let (sandbox, api) = sample_copy("edit-bulk-problems");
+
+    let dash = sandbox.run_stdin(&api, &["edit", "-", "--incomplete"], "t2\n");
+    let nothing_to_do = sandbox.run_stdin(&api, &["edit", "-"], "t2\n");
+    let words = sandbox.run_stdin(&api, &["edit", "--complete"], "t1\nBuy milk\n");
+    let empty = sandbox.run_stdin(&api, &["edit", "--complete"], "\n");
+    let delete = sandbox.run_stdin(&api, &["edit", "--delete"], "t1\n");
+
+    assert_eq!(code(&dash), 0, "{}", stderr(&dash));
+    assert_eq!(requests_with(&api, "PATCH").len(), 1);
+    assert_eq!(code(&nothing_to_do), 2);
+    assert_eq!(code(&words), 2);
+    assert!(stderr(&words).contains("isn't a task id"), "{}", stderr(&words));
+    assert_eq!(code(&empty), 2);
+    assert!(stderr(&empty).contains("no task ids on stdin"), "{}", stderr(&empty));
+    assert_eq!(code(&delete), 2);
+    assert!(stderr(&delete).contains("needs --yes"), "{}", stderr(&delete));
+    assert!(requests_with(&api, "DELETE").is_empty());
+}
+
+#[test]
+fn bulk_delete_with_yes_deletes_each_and_json_reports_each() {
+    let (sandbox, api) = sample_copy("edit-bulk-delete");
+
+    let output = sandbox.run_stdin(&api, &["edit", "--delete", "--yes", "--json"], "t1\nt3\n");
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(requests_with(&api, "DELETE").len(), 2);
+    let report: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(
+        report,
+        json!([
+            {"id": "t1", "title": "Pay rent", "action": "delete", "status": "done"},
+            {"id": "t3", "title": "Buy milk", "action": "delete", "status": "done"},
+        ])
+    );
+}
+
+#[test]
+fn edit_json_reports_a_failure_and_exits_1() {
+    let (sandbox, api) = sample_copy("edit-json-failure");
+
+    let output = sandbox.run(&api, &["edit", "missing", "--complete", "--json"]);
+
+    assert_eq!(code(&output), 1);
+    let report: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(report[0]["status"], "failed");
+    assert!(report[0]["error"].as_str().unwrap().contains("404"), "{report}");
+    assert!(sandbox.queued_tasks().is_empty(), "a refusal is not worth retrying");
+}
+
+#[test]
+fn an_edit_that_cannot_be_sent_is_queued_and_the_copy_already_shows_it() {
+    let (sandbox, api) = sample_copy("edit-queued");
+    api.set_change_status(503);
+
+    let output = sandbox.run(&api, &["edit", "t3", "--complete", "--add-label", "writing"]);
+
+    assert_eq!(code(&output), 1);
+    assert!(stderr(&output).contains("saved and will be sent the next time you run add or edit"), "{}", stderr(&output));
+    let queued = sandbox.queued_tasks();
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert!(queued[0].starts_with("{\"queued_edit\":"), "{}", queued[0]);
+    assert!(queued[0].contains("\"label-writing\""), "{}", queued[0]);
+    assert!(ids_in_json(&search(&sandbox, &["--json", "milk"])).is_empty(), "the copy has it already");
+}
+
+#[test]
+fn an_unreachable_api_queues_an_edit_as_well() {
+    let (sandbox, _api) = sample_copy("edit-unreachable");
+
+    let output = sandbox.run_with(Some("http://127.0.0.1:1"), Some("test-token"), &["edit", "t3", "--title", "Buy tea"], None);
+
+    assert_eq!(code(&output), 1);
+    assert_eq!(sandbox.queued_tasks().len(), 1);
+    assert!(stderr(&output).contains("Could not reach Godspeed"), "{}", stderr(&output));
+}
+
+#[test]
+fn add_sends_a_queued_edit_before_the_new_task() {
+    let (sandbox, api) = sample_copy("queue-edit-then-add");
+    api.set_change_status(503);
+    sandbox.run(&api, &["edit", "t3", "--title", "Buy tea"]);
+    assert_eq!(sandbox.queued_tasks().len(), 1);
+    api.set_change_status(200);
+    let before = api.requests().len();
+
+    let output = sandbox.run(&api, &["add", "Call mom"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let after: Vec<Recorded> = api.requests().into_iter().skip(before).filter(|r| r.method != "GET").collect();
+    assert_eq!(
+        after.iter().map(|r| format!("{} {}", r.method, r.path)).collect::<Vec<_>>(),
+        vec!["PATCH /tasks/t3", "POST /tasks"]
+    );
+    assert!(sandbox.queued_tasks().is_empty());
+}
+
+#[test]
+fn edit_sends_whatever_is_queued_first_so_an_older_change_cannot_overwrite_it() {
+    let (sandbox, api) = sample_copy("queue-flushed-by-edit");
+    sandbox.write_queue(&[
+        r#"{"queued_edit":{"id":"t3","title":"Buy milk","patch":{"title":"First"},"delete":false}}"#,
+        "Queued task",
+    ]);
+    let before = api.requests().len();
+
+    let output = sandbox.run(&api, &["edit", "t3", "--title", "Second"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let sent: Vec<Recorded> = api.requests().into_iter().skip(before).filter(|r| r.method != "GET").collect();
+    let titles: Vec<String> = sent
+        .iter()
+        .filter(|r| r.method == "PATCH")
+        .map(|r| serde_json::from_str::<Value>(&r.body).unwrap()["title"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(titles, vec!["First", "Second"]);
+    assert_eq!(sent.iter().filter(|r| r.method == "POST").count(), 1, "the queued add went too");
+    assert!(sandbox.queued_tasks().is_empty());
+}
+
+#[test]
+fn queued_changes_to_one_task_wait_together_while_it_keeps_failing() {
+    let (sandbox, api) = sample_copy("queue-blocked");
+    sandbox.write_queue(&[
+        r#"{"queued_edit":{"id":"t3","title":"Buy milk","patch":{"title":"One"},"delete":false}}"#,
+        r#"{"queued_edit":{"id":"t3","title":"Buy milk","patch":{"title":"Two"},"delete":false}}"#,
+    ]);
+    api.set_change_status(500);
+
+    let failing = sandbox.run(&api, &["add", "Call mom"]);
+
+    assert_eq!(requests_with(&api, "PATCH").len(), 1, "the second change doesn't try while the first fails");
+    assert_eq!(sandbox.queued_tasks().len(), 2, "both changes are still waiting");
+    assert_eq!(api.posted_tasks().len(), 1, "the new task itself was sent");
+    assert_eq!(code(&failing), 0);
+
+    api.set_change_status(200);
+    let working = sandbox.run(&api, &["add", "Call dad"]);
+
+    assert_eq!(code(&working), 0, "{}", stderr(&working));
+    let titles: Vec<String> = requests_with(&api, "PATCH")
+        .iter()
+        .skip(1)
+        .map(|r| serde_json::from_str::<Value>(&r.body).unwrap()["title"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(titles, vec!["One", "Two"], "in the order they were queued");
+    assert!(sandbox.queued_tasks().is_empty());
+}
+
+#[test]
+fn a_queued_change_godspeed_refuses_is_dropped_with_a_message() {
+    let (sandbox, api) = sample_copy("queue-refused");
+    sandbox.write_queue(&[r#"{"queued_edit":{"id":"missing","title":"Gone task","patch":{"title":"x"},"delete":false}}"#]);
+
+    let output = sandbox.run(&api, &["add", "Call mom"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(stderr(&output).contains("Dropping a queued change that can never be sent"), "{}", stderr(&output));
+    assert!(stderr(&output).contains("Gone task"), "{}", stderr(&output));
+    assert!(sandbox.queued_tasks().is_empty());
+}
+
+#[test]
+fn a_queued_delete_is_sent_later() {
+    let (sandbox, api) = sample_copy("queue-delete");
+    api.set_change_status(502);
+    let queued = sandbox.run(&api, &["edit", "t3", "--delete", "--yes"]);
+    assert_eq!(code(&queued), 1);
+    api.set_change_status(200);
+
+    let output = sandbox.run(&api, &["add", "Call mom"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let deletes = requests_with(&api, "DELETE");
+    assert_eq!(deletes.len(), 2, "one that failed and one that went through");
+    assert!(sandbox.queued_tasks().is_empty());
 }

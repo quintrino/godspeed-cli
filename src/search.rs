@@ -19,6 +19,8 @@ struct SearchArgs {
     json: bool,
     /// Add a column with each task's id.
     id: bool,
+    /// Print only the ids, one per line.
+    ids_only: bool,
     color: ColorMode,
     /// Refresh the copy before searching.
     refresh: bool,
@@ -27,7 +29,7 @@ struct SearchArgs {
     query: Vec<String>,
 }
 
-/// `--json`, `--id`, `--refresh`, `--max-age AGE` and `--color WHEN` (or `--max-age=AGE`, `--color=WHEN`)
+/// `--json`, `--id`, `--ids-only`, `--refresh`, `--max-age AGE` and `--color WHEN` (or `--max-age=AGE`, `--color=WHEN`)
 /// can go anywhere; `--` ends the
 /// options, so a query can contain them. Everything else is the query. A lone leading `-` is a
 /// negation, not an option.
@@ -66,9 +68,13 @@ fn parse_args(args: &[String]) -> Result<SearchArgs, String> {
             "--" => options_done = true,
             "--json" => parsed.json = true,
             "--id" => parsed.id = true,
+            "--ids-only" => parsed.ids_only = true,
             "--refresh" => parsed.refresh = true,
             _ => parsed.query.push(arg.clone()),
         }
+    }
+    if parsed.ids_only && parsed.json {
+        return Err("--ids-only and --json can't be combined".to_string());
     }
     Ok(parsed)
 }
@@ -212,7 +218,11 @@ pub fn run_search(args: &[String]) -> ExitCode {
     }
 
     let color = !args.json && color::stdout_color(args.color);
-    let output = present::render_with(&query, matched, &context, args.json, color, args.id);
+    let output = if args.ids_only {
+        present::render_ids(&query, matched, &context)
+    } else {
+        present::render_with(&query, matched, &context, args.json, color, args.id)
+    };
     if !output.is_empty() {
         // Ignore a closed pipe (`... | head`) instead of panicking.
         let _ = writeln!(io::stdout(), "{output}");

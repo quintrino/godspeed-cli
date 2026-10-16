@@ -258,7 +258,17 @@ impl Store {
             return Ok(());
         }
         if let (Some(object), Some(changes)) = (task.json.as_object_mut(), fields.as_object()) {
-            for key in ["title", "notes", "list_id", "snoozed_until", "timeless_snoozed_until"] {
+            let kept = [
+                "title",
+                "notes",
+                "list_id",
+                "snoozed_until",
+                "timeless_snoozed_until",
+                "due_at",
+                "timeless_due_at",
+                "duration_minutes",
+            ];
+            for key in kept {
                 if let Some(value) = changes.get(key) {
                     object.insert(key.to_string(), value.clone());
                 }
@@ -269,6 +279,13 @@ impl Store {
             if changes.contains_key("timeless_snoozed_until") {
                 object.remove("snoozed_until");
             }
+            if changes.contains_key("due_at") {
+                object.remove("timeless_due_at");
+            }
+            if changes.contains_key("timeless_due_at") {
+                object.remove("due_at");
+            }
+            change_labels(object, changes);
         }
         self.conn.execute(
             "UPDATE tasks SET json = ?2, is_complete = ?3 WHERE id = ?1",
@@ -328,6 +345,31 @@ fn write_facts(tx: &rusqlite::Transaction<'_>, facts: &Facts) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn strings(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// Adds and removes the label ids the change names (`add_label_ids`, `remove_label_ids`) in the
+/// task's `label_ids`.
+fn change_labels(task: &mut serde_json::Map<String, Value>, changes: &serde_json::Map<String, Value>) {
+    let add = strings(changes.get("add_label_ids"));
+    let remove = strings(changes.get("remove_label_ids"));
+    if add.is_empty() && remove.is_empty() {
+        return;
+    }
+    let mut current = strings(task.get("label_ids"));
+    current.retain(|id| !remove.contains(id));
+    for id in add {
+        if !current.contains(&id) {
+            current.push(id);
+        }
+    }
+    task.insert("label_ids".to_string(), Value::from(current));
 }
 
 fn string_field(value: &Value, field: &str) -> Option<String> {

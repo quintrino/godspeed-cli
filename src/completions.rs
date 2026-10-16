@@ -155,11 +155,11 @@ _godspeed_cli() {
     fi
     case $cmd in
         refresh) COMPREPLY=($(compgen -W "--full --include-completed --json" -- "$cur")); return ;;
-        edit) COMPREPLY=($(compgen -W "--title --notes --complete --incomplete --snooze --move --delete --yes --debug" -- "$cur")); return ;;
-        lists|labels) COMPREPLY=($(compgen -W "--id --json --color --debug" -- "$cur")); return ;;
+        edit) COMPREPLY=($(compgen -W "--title --notes --complete --incomplete --due --duration --add-label --remove-label --snooze --move --delete --yes --json --debug" -- "$cur")); return ;;
+        lists|labels) COMPREPLY=($(compgen -W "--id --ids-only --json --color --debug" -- "$cur")); return ;;
         completions) COMPREPLY=($(compgen -W "bash fish zsh" -- "$cur")); return ;;
         add) flags="--json" ;;
-        search) flags="--json --id --refresh --max-age --color --debug" ;;
+        search) flags="--json --id --ids-only --refresh --max-age --color --debug" ;;
         *) return ;;
     esac
     if [[ $cmd == search && ${COMP_WORDS[COMP_CWORD-1]} == --color ]]; then
@@ -221,7 +221,7 @@ _godspeed_cli_words() {
         if [[ $cmd == add ]]; then
             compadd -- --json
         else
-            compadd -- --json --id --refresh --max-age --color --debug
+            compadd -- --json --id --ids-only --refresh --max-age --color --debug
         fi
         return
     fi
@@ -260,8 +260,8 @@ _godspeed_cli() {
     fi
     case $words[2] in
         refresh) compadd -- --full --include-completed --json ;;
-        edit) compadd -- --title --notes --complete --incomplete --snooze --move --delete --yes --debug ;;
-        lists|labels) compadd -- --id --json --color --debug ;;
+        edit) compadd -- --title --notes --complete --incomplete --due --duration --add-label --remove-label --snooze --move --delete --yes --json --debug ;;
+        lists|labels) compadd -- --id --ids-only --json --color --debug ;;
         completions) compadd -- bash fish zsh ;;
         add|search) _godspeed_cli_words ;;
     esac
@@ -338,6 +338,12 @@ complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l notes -x -d 'N
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l complete -d 'Complete the task'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l incomplete -d 'Reopen the task'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l snooze -x -d 'Snooze until'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l due -x -d 'Set the due date'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l duration -x -d 'Set the duration'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l add-label -x -a '(godspeed-cli __complete labels)' -d 'Add a label'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l remove-label -x -a '(godspeed-cli __complete labels)' -d 'Remove a label'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l json -d 'Print the results as JSON'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from search lists labels' -l ids-only -d 'Print only the ids'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l move -x -a '(godspeed-cli __complete lists)' -d 'Move to a list'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l delete -d 'Delete the task'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l yes -d 'Do not ask before deleting'

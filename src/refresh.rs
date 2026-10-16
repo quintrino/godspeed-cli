@@ -73,7 +73,7 @@ pub fn collect_all(
         loop {
             let mut retries = 0;
             let page = loop {
-                if requests > 0 && requests % READS_PER_MINUTE == 0 {
+                if requests > 0 && requests.is_multiple_of(READS_PER_MINUTE) {
                     progress("Waiting a minute to stay within the API rate limit...");
                     sleep(StdDuration::from_secs(60));
                 }
@@ -423,10 +423,13 @@ mod tests {
     /// A server holding `tasks`, newest first, that serves pages of 250 like the real one.
     /// `inclusive` says whether `updated_before` includes tasks at exactly that time;
     /// `updated_after` includes them.
+    /// One request: the status asked for, `updated_before` and `updated_after`.
+    type Call = (String, Option<String>, Option<String>);
+
     struct FakeApi {
         tasks: Vec<FakeTask>,
         inclusive: bool,
-        calls: RefCell<Vec<(String, Option<String>, Option<String>)>>,
+        calls: RefCell<Vec<Call>>,
     }
 
     impl FakeApi {

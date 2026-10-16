@@ -179,16 +179,52 @@ pub fn send_task(task: &TaskRequest, api_key: &str) -> ApiResult<Value> {
     Ok(serde_json::from_str(&answer.body).unwrap_or_else(|_| serde_json::json!({})))
 }
 
+/// Why a change to a task didn't happen. `status` is the HTTP status, or none if the API
+/// couldn't be reached at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiError {
+    pub status: Option<u16>,
+    pub message: String,
+}
+
+impl ApiError {
+    /// Whether trying again later could work: the API couldn't be reached, was busy, or failed.
+    /// A refusal such as 404 or 400 will be the same next time.
+    pub fn is_retryable(&self) -> bool {
+        match self.status {
+            None => true,
+            Some(status) => status >= 500 || status == 429 || status == 408,
+        }
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// Sends a request and turns anything but success into an [`ApiError`], returning the body.
+fn call_checked(method: Method, path: &str, api_key: &str, body: Option<&Value>) -> Result<String, ApiError> {
+    let answer = call(method, path, api_key, &[], body)
+        .map_err(|e| ApiError { status: None, message: e.to_string() })?;
+    if answer.status.is_success() {
+        Ok(answer.body)
+    } else {
+        Err(ApiError { status: Some(answer.status.as_u16()), message: api_error(&answer) })
+    }
+}
+
 /// `PATCH /tasks/:id` with only the fields to change. Returns what the API answered (`{}` if the
 /// answer wasn't JSON).
-pub fn update_task(task_id: &str, changes: &Value, api_key: &str) -> ApiResult<Value> {
-    let answer = call(Method::PATCH, &format!("tasks/{task_id}"), api_key, &[], Some(changes))?;
-    expect_success(&answer)?;
-    Ok(serde_json::from_str(&answer.body).unwrap_or_else(|_| serde_json::json!({})))
+pub fn update_task(task_id: &str, changes: &Value, api_key: &str) -> Result<Value, ApiError> {
+    let body = call_checked(Method::PATCH, &format!("tasks/{task_id}"), api_key, Some(changes))?;
+    Ok(serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({})))
 }
 
 /// `DELETE /tasks/:id`.
-pub fn delete_task(task_id: &str, api_key: &str) -> ApiResult<()> {
-    let answer = call(Method::DELETE, &format!("tasks/{task_id}"), api_key, &[], None)?;
-    expect_success(&answer)
+pub fn delete_task(task_id: &str, api_key: &str) -> Result<(), ApiError> {
+    call_checked(Method::DELETE, &format!("tasks/{task_id}"), api_key, None).map(|_| ())
 }

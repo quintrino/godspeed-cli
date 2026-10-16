@@ -18,7 +18,14 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn noun(self) -> &'static str {
+    pub fn singular(self) -> &'static str {
+        match self {
+            Kind::Lists => "list",
+            Kind::Labels => "label",
+        }
+    }
+
+    pub fn noun(self) -> &'static str {
         match self {
             Kind::Lists => "lists",
             Kind::Labels => "labels",
@@ -30,6 +37,7 @@ impl Kind {
 struct Args {
     json: bool,
     id: bool,
+    ids_only: bool,
     color: ColorMode,
     /// The words to match, joined with spaces. Empty shows everything.
     filter: String,
@@ -59,12 +67,16 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         match arg.as_str() {
             "--" => options_done = true,
             "--id" => parsed.id = true,
+            "--ids-only" => parsed.ids_only = true,
             "--json" => parsed.json = true,
             other if other.starts_with("--") => return Err(format!("unknown option '{other}' (see --help)")),
             _ => words.push(arg),
         }
     }
     parsed.filter = words.join(" ");
+    if parsed.ids_only && parsed.json {
+        return Err("--ids-only and --json can't be combined".to_string());
+    }
     Ok(parsed)
 }
 
@@ -124,6 +136,10 @@ fn render(kind: Kind, items: &[&Value], args: &Args, color: bool) -> String {
     }
     if items.is_empty() {
         return String::new();
+    }
+    if args.ids_only {
+        let ids: Vec<&str> = items.iter().map(|item| text(item, "id")).collect();
+        return ids.join("\n");
     }
     let with_group = kind == Kind::Labels && items.iter().any(|item| !text(item, "group_name").is_empty());
     let mut header = vec!["NAME".to_string()];

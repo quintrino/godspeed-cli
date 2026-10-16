@@ -3,7 +3,7 @@
 use crate::names::{find_list_key, find_matching_key, NameMap};
 use crate::notify::send_notification;
 use crate::task::{parse_task, resolve_relative_dates, ParsedTask, TaskRequest};
-use crate::{api, exit, names, paths, queue, token};
+use crate::{api, exit, names, paths, pending, queue, token};
 use chrono::Local;
 use std::fmt;
 use serde_json::Value;
@@ -88,23 +88,6 @@ pub fn process_task(task_str: &str, api_key: &str) -> Result<Value, TaskError> {
     api::send_task(&request, api_key).map_err(TaskError::Failed)
 }
 
-/// Sends the tasks queued by earlier failures. A task that is invalid can never be sent, so it
-/// is dropped (and printed, so the text isn't lost) instead of being retried on every run.
-fn retry_queued_tasks(api_key: &str) {
-    for queued in queue::tasks() {
-        match process_task(&queued, api_key) {
-            Ok(_) => {
-                let _ = queue::remove(&queued);
-            }
-            Err(TaskError::Invalid(reason)) => {
-                eprintln!("Dropping a queued task that can never be sent ({reason}): {queued}");
-                let _ = queue::remove(&queued);
-            }
-            Err(TaskError::Failed(_)) => {}
-        }
-    }
-}
-
 fn read_input(task_args: &[String]) -> String {
     if !task_args.is_empty() {
         // Join all arguments with spaces to handle multi-word input
@@ -133,7 +116,7 @@ pub fn run_add(task_args: &[String], json: bool) -> ExitCode {
 
     let input = read_input(task_args);
 
-    retry_queued_tasks(&api_key);
+    pending::process(&api_key);
 
     if input.is_empty() {
         return exit::SUCCESS;

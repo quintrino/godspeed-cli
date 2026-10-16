@@ -58,7 +58,7 @@ fn moment_key(moment: Option<NaiveDateTime>) -> Key {
 
 fn sort_key(spec: &SortSpec, task: &StoredTask, ctx: &Context) -> Key {
     let json = &task.json;
-    let number = |field| ctx.number(json, field).map_or(Key::Missing, |n| Key::Num(n));
+    let number = |field| ctx.number(json, field).map_or(Key::Missing, Key::Num);
     match spec.field {
         SortField::Title => json.get("title").and_then(Value::as_str).map_or(Key::Missing, |t| Key::Text(t.to_lowercase())),
         // Lists go in the order of the sidebar unless priority targets are given.
@@ -351,6 +351,36 @@ pub fn render(query: &Query, tasks: Vec<&StoredTask>, ctx: &Context, json: bool,
     render_with(query, tasks, ctx, json, color, false)
 }
 
+/// Sorts the tasks as the query asks, and groups and limits them: the groups if there is a
+/// `group:`, and otherwise the tasks themselves are cut to the limit, in place.
+fn arrange<'a>(query: &Query, tasks: &mut Vec<&'a StoredTask>, ctx: &Context) -> Option<Vec<Group<'a>>> {
+    sort_tasks(tasks, &query.sorts, ctx);
+    let mut groups = query.group.as_ref().map(|spec| group_tasks(tasks, spec, query.duplicates, ctx));
+    match (&mut groups, query.limit) {
+        (Some(groups), Some(limit)) => limit_groups(groups, limit),
+        (None, Some(limit)) => tasks.truncate(limit),
+        (_, None) => {}
+    }
+    groups
+}
+
+/// Just the ids of the results, one per line, in the order the table would show them (grouped
+/// tasks follow group by group), each id once. For `search --ids-only`, to pipe into `edit`.
+pub fn render_ids(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context) -> String {
+    let groups = arrange(query, &mut tasks, ctx);
+    let ordered: Vec<&StoredTask> = match groups {
+        Some(groups) => groups.into_iter().flat_map(|group| group.tasks).collect(),
+        None => tasks,
+    };
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<&str> = ordered
+        .iter()
+        .filter_map(|task| task.json.get("id").and_then(Value::as_str))
+        .filter(|id| seen.insert(*id))
+        .collect();
+    ids.join("\n")
+}
+
 /// [`render`], and with `show_id` the table has a last column with each task's id. (JSON always
 /// has the id.)
 pub fn render_with(
@@ -361,14 +391,7 @@ pub fn render_with(
     color: bool,
     show_id: bool,
 ) -> String {
-    sort_tasks(&mut tasks, &query.sorts, ctx);
-
-    let mut groups = query.group.as_ref().map(|spec| group_tasks(&tasks, spec, query.duplicates, ctx));
-    match (&mut groups, query.limit) {
-        (Some(groups), Some(limit)) => limit_groups(groups, limit),
-        (None, Some(limit)) => tasks.truncate(limit),
-        (_, None) => {}
-    }
+    let groups = arrange(query, &mut tasks, ctx);
 
     if json {
         let value = match groups {
