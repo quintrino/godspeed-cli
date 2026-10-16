@@ -146,7 +146,7 @@ fn serve(stream: TcpStream, recorded: &Mutex<Vec<Recorded>>, replies: &Mutex<Vec
             }
             None => (404, "{}".to_string()),
         },
-        ("POST", "/tasks") => (post_status, "{}".to_string()),
+        ("POST", "/tasks") => (post_status, r#"{"success":true,"todo_item":{"id":"new-task-id","title":"from the mock"}}"#.to_string()),
         _ => (404, "{}".to_string()),
     };
     recorded.lock().unwrap().push(Recorded { method, path, query, authorization, body });
@@ -1338,4 +1338,97 @@ fn sort_by_modified_and_list_in_sidebar_order() {
     assert_eq!(ids_in_json(&modified), vec!["t3", "t2", "t1"]);
     assert_eq!(ids_in_json(&modified_desc), vec!["t1", "t2", "t3"]);
     assert_eq!(ids_in_json(&by_list), vec!["t2", "t1", "t3"]);
+}
+
+// ---- add --json ----
+
+#[test]
+fn add_json_prints_the_apis_response_and_nothing_else() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-json");
+
+    let output = sandbox.run(&api, &["add", "--json", "Buy", "milk", "@home", "~10m"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let response: Value = serde_json::from_str(&stdout(&output)).expect("stdout is only JSON");
+    assert_eq!(response["success"], true);
+    assert_eq!(response["todo_item"]["id"], "new-task-id");
+    let task = &api.posted_tasks()[0];
+    assert_eq!(task["title"], "Buy milk");
+    assert_eq!(task["list_id"], "list-home");
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+}
+
+#[test]
+fn add_without_json_prints_nothing_on_success() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-no-json");
+
+    let output = sandbox.run(&api, &["add", "Buy milk"]);
+
+    assert_eq!(code(&output), 0);
+    assert!(stdout(&output).is_empty());
+}
+
+#[test]
+fn add_json_reads_the_task_from_stdin_too() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-json-stdin");
+
+    let output = sandbox.run_stdin(&api, &["add", "--json"], "Weekly review @work ~30m");
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let response: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(response["success"], true);
+    assert_eq!(api.posted_tasks()[0]["title"], "Weekly review");
+}
+
+#[test]
+fn add_json_prints_nothing_on_stdout_when_the_task_is_queued_or_rejected() {
+    let sandbox = Sandbox::new("add-json-failures");
+    let down = MockApi::start(500);
+    let up = MockApi::start(200);
+
+    let queued = sandbox.run(&down, &["add", "--json", "Offline task"]);
+
+    assert_eq!(code(&queued), 1);
+    assert!(stdout(&queued).is_empty());
+    assert!(stderr(&queued).contains("Failed to send task"));
+    assert_eq!(sandbox.queued_tasks(), vec!["Offline task"]);
+
+    // The next run retries the queued task first, so the queue empties. The invalid task is
+    // rejected, and stdout stays empty: the retried task's response isn't printed either.
+    let rejected = sandbox.run(&up, &["add", "--json", "@work"]);
+    assert_eq!(code(&rejected), 2);
+    assert!(stdout(&rejected).is_empty());
+    assert!(stderr(&rejected).contains("no title"));
+}
+
+#[test]
+fn add_json_does_not_print_the_responses_of_retried_queued_tasks() {
+    let sandbox = Sandbox::new("add-json-retry");
+    sandbox.write_queue(&["Queued earlier"]);
+    let api = MockApi::start(200);
+
+    let output = sandbox.run(&api, &["add", "--json", "New task"]);
+
+    assert_eq!(code(&output), 0);
+    assert_eq!(api.posted_tasks().len(), 2);
+    let response: Value = serde_json::from_str(&stdout(&output)).expect("exactly one JSON document");
+    assert_eq!(response["success"], true);
+}
+
+#[test]
+fn a_task_can_start_with_the_word_json_flag_using_double_dash() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-dash-dash-json");
+
+    let output = sandbox.run(&api, &["add", "--", "--json", "format", "notes"]);
+    let trailing = sandbox.run(&api, &["add", "Convert", "to", "--json"]);
+
+    assert_eq!(code(&output), 0);
+    assert!(stdout(&output).is_empty());
+    assert!(stdout(&trailing).is_empty());
+    let titles: Vec<String> = api.posted_tasks().iter().map(|t| t["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(titles, vec!["--json format notes", "Convert to --json"]);
 }

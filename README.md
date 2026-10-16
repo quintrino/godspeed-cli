@@ -56,7 +56,7 @@ echo "Buy groceries and cook dinner" | godspeed-cli
 
 | Command | |
 | --- | --- |
-| `add` | Create a task. This is the default, so `godspeed-cli "Buy milk"` and `godspeed-cli add "Buy milk"` are the same. |
+| `add` | Create a task. This is the default, so `godspeed-cli "Buy milk"` and `godspeed-cli add "Buy milk"` are the same. `add --json` also prints the API's response. See [add --json](#add---json). |
 | `refresh` | Download your tasks, lists and labels into a local cache. See [Refresh](#refresh). |
 | `search` | Search the local copy made by `refresh`, offline. See [Search](#search). |
 
@@ -67,6 +67,19 @@ godspeed-cli "search the attic"
 godspeed-cli add search the attic
 godspeed-cli -- search the attic
 ```
+
+### `add --json`
+
+`godspeed-cli add --json "Pay rent @Home ~30m :20261101"` creates the task and then prints the API's response, as JSON, on stdout, so a script can read the new task's id:
+
+```bash
+godspeed-cli add --json "Pay rent @Home" | jq -r '.todo_item.id'
+```
+
+- `--json` must come straight after `add`. After the task text it is just text, so `godspeed-cli add Convert notes to --json` still creates a task with that title. For a task that *starts* with `--json`, write `add -- --json ...`.
+- It works with the task on stdin too: `echo "Pay rent" | godspeed-cli add --json`.
+- Stdout only has the response when the task was created. If the task is queued (exit status 1) or rejected (exit status 2) there is nothing on stdout, and the error is on stderr as usual. Queued tasks that are retried first are not printed.
+- If the API's answer isn't JSON, `{}` is printed.
 
 ### Options
 

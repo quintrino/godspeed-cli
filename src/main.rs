@@ -22,13 +22,16 @@ const HELP: &str = r#"Create a task in Godspeed from the command line.
 
 USAGE:
     godspeed-cli [add] [--] <TASK>...
+    godspeed-cli add --json [--] <TASK>...
     echo "<TASK>" | godspeed-cli
     godspeed-cli refresh [--include-completed] [--json]
     godspeed-cli search [--json] [QUERY]...
     godspeed-cli --help | --version
 
 COMMANDS:
-    add       Create a task. This is the default, so `add` can be left out.
+    add       Create a task. This is the default, so `add` can be left out. `add --json`
+              prints the API's response to the task as JSON on success (as the first
+              argument after `add`; use `add -- --json ...` for a task that starts with it).
     refresh   Download all your tasks, lists and labels into a local cache (for searching).
               Incomplete tasks only, unless --include-completed is given. Replaces the
               previous copy, and keeps it if the download fails. --json prints the counts as
@@ -189,6 +192,8 @@ enum Invocation {
     Version,
     /// The task text, as separate arguments. Empty means read it from stdin.
     Add(Vec<String>),
+    /// `add --json`: the same, then print the API's response.
+    AddJson(Vec<String>),
     Refresh(Vec<String>),
     Search(Vec<String>),
     SearchHelp,
@@ -206,6 +211,10 @@ fn parse_invocation(args: &[String]) -> Invocation {
         "add" => match rest.first().map(String::as_str) {
             Some("-h" | "--help") => Invocation::Help,
             Some("-V" | "--version") => Invocation::Version,
+            Some("--json") => match rest.get(1).map(String::as_str) {
+                Some("--") => Invocation::AddJson(rest[2..].to_vec()),
+                _ => Invocation::AddJson(rest[1..].to_vec()),
+            },
             Some("--") => Invocation::Add(rest[1..].to_vec()),
             _ => Invocation::Add(rest.to_vec()),
         },
@@ -232,7 +241,8 @@ fn main() -> ExitCode {
             println!("godspeed-cli {}", env!("CARGO_PKG_VERSION"));
             exit::SUCCESS
         }
-        Invocation::Add(task_args) => capture::run_add(&task_args),
+        Invocation::Add(task_args) => capture::run_add(&task_args, false),
+        Invocation::AddJson(task_args) => capture::run_add(&task_args, true),
         Invocation::Refresh(refresh_args) => refresh::run_refresh(&refresh_args),
         Invocation::Search(search_args) => search::run_search(&search_args),
         Invocation::SearchHelp => {
@@ -301,6 +311,32 @@ mod tests {
         );
         assert_eq!(parse_invocation(&args(&["add", "--help"])), Invocation::Help);
         assert_eq!(parse_invocation(&args(&["add", "-V"])), Invocation::Version);
+    }
+
+    #[test]
+    fn add_json_is_only_a_flag_straight_after_add() {
+        assert_eq!(
+            parse_invocation(&args(&["add", "--json", "Buy", "milk"])),
+            Invocation::AddJson(args(&["Buy", "milk"]))
+        );
+        assert_eq!(parse_invocation(&args(&["add", "--json"])), Invocation::AddJson(vec![]));
+        assert_eq!(
+            parse_invocation(&args(&["add", "--json", "--", "--json", "x"])),
+            Invocation::AddJson(args(&["--json", "x"]))
+        );
+        // After the task text, or after `--`, it is just text; and without `add` it is a task.
+        assert_eq!(
+            parse_invocation(&args(&["add", "Buy", "--json"])),
+            Invocation::Add(args(&["Buy", "--json"]))
+        );
+        assert_eq!(
+            parse_invocation(&args(&["add", "--", "--json", "x"])),
+            Invocation::Add(args(&["--json", "x"]))
+        );
+        assert_eq!(
+            parse_invocation(&args(&["--json", "x"])),
+            Invocation::Add(args(&["--json", "x"]))
+        );
     }
 
     #[test]

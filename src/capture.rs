@@ -6,7 +6,8 @@ use crate::task::{parse_task, resolve_relative_dates, ParsedTask, TaskRequest};
 use crate::{api, exit, names, paths, queue, token};
 use chrono::Local;
 use std::fmt;
-use std::io::{self, Read};
+use serde_json::Value;
+use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
 pub enum TaskError {
@@ -65,7 +66,7 @@ fn resolve_names(
     Ok(())
 }
 
-pub fn process_task(task_str: &str, api_key: &str) -> Result<(), TaskError> {
+pub fn process_task(task_str: &str, api_key: &str) -> Result<Value, TaskError> {
     let ParsedTask { mut request, list_names, label_names } = parse_task(task_str);
 
     if list_names.len() > 1 {
@@ -88,7 +89,7 @@ pub fn process_task(task_str: &str, api_key: &str) -> Result<(), TaskError> {
 fn retry_queued_tasks(api_key: &str) {
     for queued in queue::tasks() {
         match process_task(&queued, api_key) {
-            Ok(()) => {
+            Ok(_) => {
                 let _ = queue::remove(&queued);
             }
             Err(TaskError::Invalid(reason)) => {
@@ -111,7 +112,7 @@ fn read_input(task_args: &[String]) -> String {
 }
 
 /// `godspeed-cli [add] <TASK>...`, or the task on stdin.
-pub fn run_add(task_args: &[String]) -> ExitCode {
+pub fn run_add(task_args: &[String], json: bool) -> ExitCode {
     if let Err(e) = paths::ensure_data_dir() {
         eprintln!("Failed to create directories: {}", e);
         return exit::failure();
@@ -135,7 +136,13 @@ pub fn run_add(task_args: &[String]) -> ExitCode {
     }
 
     match process_task(&input, &api_key) {
-        Ok(()) => exit::SUCCESS,
+        Ok(response) => {
+            if json {
+                // Ignore a closed pipe instead of panicking.
+                let _ = writeln!(io::stdout(), "{}", serde_json::to_string_pretty(&response).expect("the response serialises"));
+            }
+            exit::SUCCESS
+        }
         Err(TaskError::Invalid(reason)) => {
             eprintln!("Error: {reason}");
             send_notification(&format!("Error: {reason}"));

@@ -102,7 +102,8 @@ pub fn fetch_task_page(api_key: &str, status: &str, updated_before: Option<&str>
     response.json().map_err(|e| PageError::Failed(Box::new(e)))
 }
 
-pub fn send_task(task: &TaskRequest, api_key: &str) -> ApiResult<()> {
+/// Creates the task and returns what the API answered (`{}` if the answer wasn't JSON).
+pub fn send_task(task: &TaskRequest, api_key: &str) -> ApiResult<Value> {
     let response = reqwest::blocking::Client::new()
         .post(api_url("tasks"))
         .header("Authorization", format!("Bearer {}", api_key))
@@ -111,7 +112,7 @@ pub fn send_task(task: &TaskRequest, api_key: &str) -> ApiResult<()> {
         .send()?;
 
     if response.status().is_success() {
-        Ok(())
+        Ok(response.json().unwrap_or_else(|_| serde_json::json!({})))
     } else {
         Err(format!("API error: {}", response.status()).into())
     }
