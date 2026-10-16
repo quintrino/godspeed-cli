@@ -155,12 +155,12 @@ _godspeed_cli() {
     fi
     case $cmd in
         refresh) COMPREPLY=($(compgen -W "--full --include-completed --json" -- "$cur")); return ;;
-        edit) COMPREPLY=($(compgen -W "--interactive --title --notes --complete --incomplete --due --duration --add-label --remove-label --snooze --move --delete --yes --json --debug" -- "$cur")); return ;;
+        edit) COMPREPLY=($(compgen -W "--interactive --dry-run --title --notes --complete --incomplete --due --duration --add-label --remove-label --snooze --move --delete --yes --json --debug" -- "$cur")); return ;;
         show) COMPREPLY=($(compgen -W "--json --debug" -- "$cur")); return ;;
         queue) COMPREPLY=($(compgen -W "list retry drop --json --count --all --yes --debug" -- "$cur")); return ;;
         lists|labels) COMPREPLY=($(compgen -W "--id --ids-only --count --json --color --debug" -- "$cur")); return ;;
         completions) COMPREPLY=($(compgen -W "bash fish zsh" -- "$cur")); return ;;
-        add) flags="--json" ;;
+        add) flags="--json --dry-run --each --due --duration --snooze --start --notes --list --label --complete --debug" ;;
         search) flags="--json --id --ids-only --count --refresh --max-age --color --debug" ;;
         *) return ;;
     esac
@@ -221,7 +221,7 @@ _godspeed_cli_words() {
     fi
     if [[ $PREFIX == --* ]]; then
         if [[ $cmd == add ]]; then
-            compadd -- --json
+            compadd -- --json --dry-run --each --due --duration --snooze --start --notes --list --label --complete --debug
         else
             compadd -- --json --id --ids-only --count --refresh --max-age --color --debug
         fi
@@ -264,7 +264,7 @@ _godspeed_cli() {
     fi
     case $words[2] in
         refresh) compadd -- --full --include-completed --json ;;
-        edit) compadd -- --interactive --title --notes --complete --incomplete --due --duration --add-label --remove-label --snooze --move --delete --yes --json --debug ;;
+        edit) compadd -- --interactive --dry-run --title --notes --complete --incomplete --due --duration --add-label --remove-label --snooze --move --delete --yes --json --debug ;;
         show) compadd -- --json --debug ;;
         queue) compadd -- list retry drop --json --count --all --yes --debug ;;
         lists|labels) compadd -- --id --ids-only --count --json --color --debug ;;
@@ -335,6 +335,16 @@ complete -c godspeed-cli -n __fish_use_subcommand -a completions -d 'Print a she
 complete -c godspeed-cli -n __fish_use_subcommand -s h -l help -d 'Show the help'
 complete -c godspeed-cli -n __fish_use_subcommand -s V -l version -d 'Show the version'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from add' -l json -d 'Print the API response as JSON'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from add' -l dry-run -d 'Show what would be created'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from add' -l each -d 'Make a task of every line or argument'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from add' -l due -x -d 'Set the due date'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from add' -l duration -x -d 'Set the duration'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from add' -l snooze -x -d 'Snooze until'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from add' -l start -x -d 'Set the start date'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from add' -l notes -x -d 'Set the notes'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from add' -l list -x -a '(godspeed-cli __complete lists)' -d 'Put the task in a list'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from add' -l label -x -a '(godspeed-cli __complete labels)' -d 'Add a label'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from add' -l complete -d 'Create the task already complete'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from refresh' -l full -d 'Rebuild the copy from scratch'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from refresh' -l include-completed -d 'Also keep completed tasks'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from refresh' -l json -d 'Print a report as JSON'
@@ -357,6 +367,7 @@ complete -c godspeed-cli -n '__fish_seen_subcommand_from show queue' -l json -d 
 complete -c godspeed-cli -n '__fish_seen_subcommand_from queue' -a 'list retry drop'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from queue' -l all -d 'Drop everything'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from queue' -l yes -d 'Do not ask'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l dry-run -d 'Show what would be done'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l interactive -s i -d 'Choose the task from a list'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l move -x -a '(godspeed-cli __complete lists)' -d 'Move to a list'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l delete -d 'Delete the task'

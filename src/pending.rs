@@ -2,7 +2,7 @@
 //! couldn't send. Both commands send what is waiting before they do their own work, so older
 //! things go first.
 
-use crate::capture::{process_task, TaskError};
+use crate::capture::{process_task_with, split_entry, TaskError};
 use crate::edit::PendingEdit;
 use crate::queue;
 use std::collections::HashSet;
@@ -40,16 +40,19 @@ pub fn process(api_key: &str) {
                     }
                 }
             }
-            None => match process_task(&entry, api_key) {
-                Ok(_) => {
-                    let _ = queue::remove(&entry);
+            None => {
+                let (text, options) = split_entry(&entry);
+                match process_task_with(&text, &options, api_key) {
+                    Ok(_) => {
+                        let _ = queue::remove(&entry);
+                    }
+                    Err(TaskError::Invalid(reason)) => {
+                        eprintln!("Dropping a queued task that can never be sent ({reason}): {entry}");
+                        let _ = queue::remove(&entry);
+                    }
+                    Err(TaskError::Failed(_)) => {}
                 }
-                Err(TaskError::Invalid(reason)) => {
-                    eprintln!("Dropping a queued task that can never be sent ({reason}): {entry}");
-                    let _ = queue::remove(&entry);
-                }
-                Err(TaskError::Failed(_)) => {}
-            },
+            }
         }
     }
 }

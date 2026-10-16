@@ -35,10 +35,9 @@ use std::process::ExitCode;
 enum Invocation {
     Help,
     Version,
-    /// `add`: the task text, as separate arguments. Empty means read it from stdin.
+    /// `add`: its options and the task text, as separate arguments. No text means read it
+    /// from stdin.
     Add(Vec<String>),
-    /// `add --json`: the same, then print the API's response.
-    AddJson(Vec<String>),
     Refresh(Vec<String>),
     Search(Vec<String>),
     Lists(Vec<String>),
@@ -80,11 +79,6 @@ fn parse_invocation(args: &[String]) -> Invocation {
         "add" => match rest.first().map(String::as_str) {
             Some("-h" | "--help") => Invocation::AddHelp,
             Some("-V" | "--version") => Invocation::Version,
-            Some("--json") => match rest.get(1).map(String::as_str) {
-                Some("--") => Invocation::AddJson(rest[2..].to_vec()),
-                _ => Invocation::AddJson(rest[1..].to_vec()),
-            },
-            Some("--") => Invocation::Add(rest[1..].to_vec()),
             _ => Invocation::Add(rest.to_vec()),
         },
         "refresh" => match rest.first().map(String::as_str) {
@@ -146,7 +140,8 @@ fn print_help(page: &str) {
 
 /// Takes `--debug` out of the arguments and turns debugging on if it was there. It can come
 /// before the command or anywhere after it, except that for `add` it only counts straight after
-/// the command (like `--json`), so a task can contain the word, and that after `--` it is text.
+/// the command, among the options of `add` (like `--json`), so a task can contain the word, and
+/// that after `--` it is text.
 fn take_debug(args: Vec<String>) -> Vec<String> {
     let mut found = false;
     let mut kept: Vec<String> = Vec::new();
@@ -158,13 +153,26 @@ fn take_debug(args: Vec<String>) -> Vec<String> {
     let command = iter.next();
     let only_leading = command.as_deref() == Some("add");
     let mut scanning = true;
+    // The next argument is the value of an option of `add`, so it is not looked at.
+    let mut value_next = false;
     for arg in iter {
+        if scanning && value_next {
+            value_next = false;
+            kept.push(arg);
+            continue;
+        }
         if scanning && arg == "--debug" {
             found = true;
             continue;
         }
-        if arg == "--" || (only_leading && arg != "--json") {
+        if arg == "--" {
             scanning = false;
+        } else if only_leading {
+            match capture::option_width(&arg) {
+                Some(2) => value_next = true,
+                Some(_) => {}
+                None => scanning = false,
+            }
         }
         kept.push(arg);
     }
@@ -188,8 +196,7 @@ fn main() -> ExitCode {
             println!("godspeed-cli {}", env!("CARGO_PKG_VERSION"));
             exit::SUCCESS
         }
-        Invocation::Add(task_args) => capture::run_add(&task_args, false),
-        Invocation::AddJson(task_args) => capture::run_add(&task_args, true),
+        Invocation::Add(task_args) => capture::run_add(&task_args),
         Invocation::Refresh(refresh_args) => refresh::run_refresh(&refresh_args),
         Invocation::Search(search_args) => search::run_search(&search_args),
         Invocation::Lists(list_args) => listing::run(listing::Kind::Lists, &list_args),
@@ -299,16 +306,19 @@ mod tests {
     }
 
     #[test]
-    fn add_double_dash_ends_the_options_so_the_task_can_start_with_a_flag() {
+    fn add_gets_everything_after_it_to_sort_out_its_options_itself() {
         assert_eq!(
             parse_invocation(&args(&["add", "--", "--version", "bump"])),
-            Invocation::Add(args(&["--version", "bump"]))
+            Invocation::Add(args(&["--", "--version", "bump"]))
         );
+        assert_eq!(parse_invocation(&args(&["add", "--"])), Invocation::Add(args(&["--"])));
         assert_eq!(
-            parse_invocation(&args(&["add", "--", "search", "the", "attic"])),
-            Invocation::Add(args(&["search", "the", "attic"]))
+            parse_invocation(&args(&["add", "--json", "--due", "friday", "Buy", "milk"])),
+            Invocation::Add(args(&["--json", "--due", "friday", "Buy", "milk"]))
         );
-        assert_eq!(parse_invocation(&args(&["add", "--"])), Invocation::Add(vec![]));
+        assert_eq!(parse_invocation(&args(&["add", "--json"])), Invocation::Add(args(&["--json"])));
+        assert_eq!(parse_invocation(&args(&["add", "-h"])), Invocation::AddHelp);
+        assert_eq!(parse_invocation(&args(&["add", "-V"])), Invocation::Version);
     }
 
     #[test]
@@ -332,28 +342,6 @@ mod tests {
         assert_eq!(parse_invocation(&args(&["add", "--help"])), Invocation::AddHelp);
         assert_eq!(parse_invocation(&args(&["add", "-h"])), Invocation::AddHelp);
         assert_eq!(parse_invocation(&args(&["add", "-V"])), Invocation::Version);
-    }
-
-    #[test]
-    fn add_json_is_only_a_flag_straight_after_add() {
-        assert_eq!(
-            parse_invocation(&args(&["add", "--json", "Buy", "milk"])),
-            Invocation::AddJson(args(&["Buy", "milk"]))
-        );
-        assert_eq!(parse_invocation(&args(&["add", "--json"])), Invocation::AddJson(vec![]));
-        assert_eq!(
-            parse_invocation(&args(&["add", "--json", "--", "--json", "x"])),
-            Invocation::AddJson(args(&["--json", "x"]))
-        );
-        // After the task text, or after `--`, it is just text.
-        assert_eq!(
-            parse_invocation(&args(&["add", "Buy", "--json"])),
-            Invocation::Add(args(&["Buy", "--json"]))
-        );
-        assert_eq!(
-            parse_invocation(&args(&["add", "--", "--json", "x"])),
-            Invocation::Add(args(&["--json", "x"]))
-        );
     }
 
     #[test]

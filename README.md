@@ -64,7 +64,7 @@ echo "Buy groceries and cook dinner" | godspeed-cli add
 
 | Command | |
 | --- | --- |
-| `add` | Create a task. `add --json` also prints the API's response. See [add --json](#add---json). |
+| `add` | Create a task, with the task syntax or options like `--due` and `--label`. `--each` makes a task of every line piped in, `--dry-run` shows what would be created, and `--json` prints the API's response. See [Options of `add`](#options-of-add). |
 | `edit` | Edit, complete, snooze, set the due date, duration or labels of, delete or move a task, by id, or many ids piped in. See [Edit](#edit). |
 | `show` | Show everything the local copy knows about one task. See [Show](#show). |
 | `queue` | Show, retry or drop what is waiting to be sent. See [Queue](#queue). |
@@ -80,7 +80,7 @@ godspeed-cli add search the attic
 godspeed-cli add completions are due ~5m
 ```
 
-The one exception is a task that starts with an option: `-h`, `--help`, `-V`, `--version`, `--json` or `--`. Put `--` first for that: `godspeed-cli add -- --version bump`.
+The one exception is a task that starts with an option of `add` (see [Options of `add`](#options-of-add)), or with `-h`, `--help`, `-V` or `--version`. Put `--` first for that: `godspeed-cli add -- --version bump`.
 
 ### `add --json`
 
@@ -94,6 +94,61 @@ godspeed-cli add --json "Pay rent @Home" | jq -r '.todo_item.id'
 - It works with the task on stdin too: `echo "Pay rent" | godspeed-cli add --json`.
 - Stdout only has the response when the task was created. If the task is queued (exit status 1) or rejected (exit status 2) there is nothing on stdout, and the error is on stderr as usual. Queued tasks that are retried first are not printed.
 - If the API's answer isn't JSON, `{}` is printed.
+
+### Options of `add`
+
+Everything `edit` can set, `add` can set too, either in the task syntax (see [Special Syntax](#special-syntax)) or with an option straight after `add`:
+
+```bash
+godspeed-cli add --due friday --duration 45m --label Urgent "Call the bank"
+godspeed-cli add --list Home --snooze tomorrow --notes "Ask about fees" "Call the bank"
+godspeed-cli add --complete "Logged: called the bank"
+```
+
+| Option | |
+| --- | --- |
+| `--due WHEN` | Due date: `tomorrow`, `friday`, `"friday 5pm"`, `"in 2 days"`, `2026-10-31`, `20261031`. A day with no time is a due date with no time. Replaces a `:date` in the task. |
+| `--duration LENGTH` | `45` (minutes), `45m`, `1.5h`. Replaces a `~duration`. |
+| `--list NAME` | The list, matched as `@list` is. Replaces an `@list`. |
+| `--label NAME` | A label, matched as `.label` is. Repeat for several; adds to any `.label` in the task. |
+| `--notes TEXT` | The notes. Replaces an `n:` in the task. |
+| `--snooze WHEN` | Snooze until `WHEN`, written as for `--due`. A time in the past is refused. |
+| `--start WHEN` | The start date, written as for `--due`. |
+| `--complete` | Create the task already complete. |
+| `--each` | Make a task of every argument, or of every line piped in (see below). |
+| `--dry-run` | Show what would be created, and send nothing (see below). |
+| `--json` | Print the API's response (see [`add --json`](#add---json)). |
+
+The options must come straight after `add`: the first word that isn't an option starts the task, so `godspeed-cli add Buy --json` still creates a task titled "Buy --json". `--` ends the options, for a task that starts with one: `add -- --due soon`. An option wins over the same thing written in the task (`add --due friday "Pay rent :tomorrow"` is due Friday).
+
+The snooze, the start date and being complete can't be given when a task is created, so `add` sends them as a change to the new task straight after. If that second request can't be sent, the task still exists, and the change is saved and sent by the next `add` or `edit` (see [`queue`](#queue)). A task that can't be sent at all is queued with its options.
+
+#### Many tasks at once
+
+By default all of stdin is one task (so a task with several lines can be piped in). With `--each` every line is its own task, and every argument too:
+
+```bash
+godspeed-cli add --each --list Home "Buy milk" "Call mom"
+godspeed-cli add --each --label Reading --due friday < reading-list.txt
+grep -h TODO *.md | sed 's/^.*TODO: //' | godspeed-cli add --each --list Inbox
+```
+
+Blank lines are skipped, the options apply to every task, and the tasks are sent one at a time: one that fails doesn't stop the others, and a summary (`3 created, 1 queued, 0 rejected.`) goes to stderr. The exit status is `1` if any was queued, otherwise `2` if any was rejected (and never queued), otherwise `0`. With `--json` the output is an array with the `status` (`created`, `queued` or `rejected`) of each.
+
+#### Checking first with `--dry-run`
+
+`add --dry-run` parses the task and options and shows what would be created, without sending anything or needing a token. It is the way to check the syntax, or a long pipe, before running it:
+
+```
+$ godspeed-cli add --dry-run --due friday --label Urgent "Call the bank @Home ~15m"
+Would create 'Call the bank'
+  list      Home
+  labels    Urgent
+  due       2026-10-23
+  duration  15m
+```
+
+List and label names are shown as written, not looked up. A task that would be rejected (two lists, no title) is reported, with exit status `2`. `--json` prints what would be created, as JSON. The queue isn't sent.
 
 ### Options
 
@@ -247,7 +302,7 @@ This creates a task with:
 
 ## Multi-line Tasks
 
-The CLI supports multi-line input, which is especially useful for detailed tasks:
+The CLI supports multi-line input, which is especially useful for detailed tasks. All of stdin is one task, unless you pass `--each` (see [Many tasks at once](#many-tasks-at-once)):
 
 ```bash
 echo "Project planning session
@@ -530,9 +585,23 @@ With options, they're done at once, which suits scripts:
 | `--move LIST` | Move to a list, matched as `@list` is in `add`. |
 | `--delete` | Delete the task, after asking `[y/N]`. `--yes` (`-y`) skips the question. It can't be undone, and can't be combined with other options. |
 | `-i`, `--interactive` | Choose the task from a list (above). |
+| `--dry-run` | Show what would be done to each task, and do nothing (see below). |
 | `--json` | Print what happened to each task as JSON: `id`, `title`, `action`, `status` (`done`, `queued` or `failed`) and `error`. |
 
 These use `PATCH /tasks/:id` and `DELETE /tasks/:id`, sending only the fields that change. The local copy is updated as well, so `search` sees the change at once; the next `refresh` brings in Godspeed's own version. An id that isn't in the local copy is still tried.
+
+### Checking first with `--dry-run`
+
+`edit --dry-run` shows what would be done to each task and does nothing: nothing is sent, asked, queued or changed in the local copy, and what is waiting in the queue isn't sent. It shows the changes as they would be sent, so `--snooze tomorrow` shows the date it means, and `--move home` the list's id. It is the way to check a pipe before running it:
+
+```bash
+godspeed-cli search 'list:Someday' --ids-only | godspeed-cli edit --delete --dry-run
+# Would delete 'Learn the cello' (5a1b2c3d).
+# Would delete 'Build a boat' (7e8f9a0b).
+# Dry run: 2 tasks would be changed; nothing was sent.
+```
+
+Deleting needs neither the question nor `--yes` in a dry run. It needs no token if the lists and labels it names are in the local copy. A task whose id isn't in the local copy is shown as `(not in the local copy, so not checked)`. With `--json` each task has the status `dry-run`, and the `patch`.
 
 ### Editing many tasks
 

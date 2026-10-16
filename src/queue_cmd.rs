@@ -5,6 +5,7 @@
 //! - `queue retry` tries to send it all now.
 //! - `queue drop N...` or `queue drop --all` throws waiting items away.
 
+use crate::capture::{split_entry, AddOptions};
 use crate::edit::{read_line, PendingEdit};
 use crate::{exit, pending, queue, token};
 use serde_json::{json, Value};
@@ -14,8 +15,8 @@ use std::process::ExitCode;
 /// One thing in the queue.
 #[derive(Debug, PartialEq)]
 enum Item {
-    /// A task to create, as it was typed.
-    Add(String),
+    /// A task to create, as it was typed, and the options it was added with.
+    Add(String, AddOptions),
     Edit(PendingEdit),
 }
 
@@ -24,7 +25,10 @@ fn items() -> Vec<Item> {
         .into_iter()
         .map(|entry| match PendingEdit::parse(&entry) {
             Some(edit) => Item::Edit(edit),
-            None => Item::Add(entry),
+            None => {
+                let (text, options) = split_entry(&entry);
+                Item::Add(text, options)
+            }
         })
         .collect()
 }
@@ -44,7 +48,8 @@ fn shorten(text: &str, width: usize) -> String {
 /// What the item will do, on one line.
 fn describe(item: &Item) -> (&'static str, String) {
     match item {
-        Item::Add(text) => ("add", single_line(text)),
+        Item::Add(text, options) if options.is_empty() => ("add", single_line(text)),
+        Item::Add(text, options) => ("add", format!("{}  [{}]", single_line(text), options.summary())),
         Item::Edit(edit) => {
             let what = if edit.delete {
                 "delete".to_string()
@@ -64,7 +69,8 @@ fn describe(item: &Item) -> (&'static str, String) {
 
 fn item_json(number: usize, item: &Item) -> Value {
     match item {
-        Item::Add(text) => json!({"number": number, "kind": "add", "text": text}),
+        Item::Add(text, options) if options.is_empty() => json!({"number": number, "kind": "add", "text": text}),
+        Item::Add(text, options) => json!({"number": number, "kind": "add", "text": text, "options": options}),
         Item::Edit(edit) => json!({
             "number": number,
             "kind": "edit",
@@ -244,7 +250,7 @@ mod tests {
 
     #[test]
     fn an_added_task_and_a_change_are_described_on_one_line() {
-        assert_eq!(describe(&Item::Add("Buy  milk\n@Home".into())), ("add", "Buy milk @Home".to_string()));
+        assert_eq!(describe(&Item::Add("Buy  milk\n@Home".into(), AddOptions::default())), ("add", "Buy milk @Home".to_string()));
         let edit = PendingEdit {
             id: "t3".into(),
             title: Some("Buy milk".into()),
@@ -254,6 +260,12 @@ mod tests {
         assert_eq!(describe(&Item::Edit(edit)), ("edit", "Buy milk (t3): is_complete=true title=\"Tea\"".to_string()));
         let delete = PendingEdit { id: "t4".into(), title: None, patch: None, delete: true };
         assert_eq!(describe(&Item::Edit(delete)), ("edit", "t4 (t4): delete".to_string()));
+    }
+
+    #[test]
+    fn a_task_added_with_options_shows_them() {
+        let options = AddOptions { list: Some("Work".into()), complete: true, ..AddOptions::default() };
+        assert_eq!(describe(&Item::Add("Buy milk".into(), options)), ("add", "Buy milk  [list Work, complete]".to_string()));
     }
 
     #[test]

@@ -57,6 +57,8 @@ struct Args {
     json: bool,
     /// Choose the task from a list.
     interactive: bool,
+    /// Show what would be done, and do nothing.
+    dry_run: bool,
 }
 
 /// The value of an option that takes one: the next argument, or the part after `=`.
@@ -109,6 +111,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 "--yes" | "-y" => parsed.yes = true,
                 "--json" => parsed.json = true,
                 "--interactive" | "-i" => parsed.interactive = true,
+                "--dry-run" => parsed.dry_run = true,
                 other => return Err(format!("unknown option '{other}' (see `godspeed-cli edit --help`)")),
             }
         }
@@ -565,12 +568,16 @@ fn when_field(
     }
 }
 
-fn snooze_field(text: &str, now: NaiveDateTime) -> Result<(&'static str, String), String> {
+pub(crate) fn snooze_field(text: &str, now: NaiveDateTime) -> Result<(&'static str, String), String> {
     when_field(text, now, "timeless_snoozed_until", "snoozed_until", false)
 }
 
-fn due_field(text: &str, now: NaiveDateTime) -> Result<(&'static str, String), String> {
+pub(crate) fn due_field(text: &str, now: NaiveDateTime) -> Result<(&'static str, String), String> {
     when_field(text, now, "timeless_due_at", "due_at", true)
+}
+
+pub(crate) fn start_field(text: &str, now: NaiveDateTime) -> Result<(&'static str, String), String> {
+    when_field(text, now, "timeless_starts_at", "starts_at", true)
 }
 
 /// The names in the changes, as ids.
@@ -670,6 +677,9 @@ fn lookup(kind: Kind, text: &str, api_key: &str) -> Result<(String, String), Str
         return Ok((id, name));
     }
 
+    if api_key.is_empty() {
+        return Err(format!("no {} matches '{text}' in the local copy, and there is no token to ask Godspeed", kind.singular()));
+    }
     debug!("'{text}' matches no known {}; fetching them", kind.noun());
     let fetched = match kind {
         Kind::Lists => api::fetch_list_items(api_key),
@@ -761,6 +771,8 @@ enum Outcome {
     /// Godspeed couldn't be reached; the change is saved and will be sent later.
     Queued(String),
     Failed(String),
+    /// `--dry-run`: nothing was sent.
+    DryRun,
 }
 
 impl Outcome {
@@ -769,6 +781,7 @@ impl Outcome {
             Outcome::Done => "done",
             Outcome::Queued(_) => "queued",
             Outcome::Failed(_) => "failed",
+            Outcome::DryRun => "dry-run",
         }
     }
 }
@@ -830,11 +843,17 @@ pub fn run_edit(args: &[String]) -> ExitCode {
     if from_stdin && args.changes.is_empty() {
         return fail("editing the ids on stdin needs something to do, such as --complete");
     }
-    let Some(api_key) = token::load_token() else {
-        return fail(&format!(
-            "GODSPEED_TOKEN is not set (environment variable, or an `export GODSPEED_TOKEN=...` line in {})",
-            paths::token_file_path().display()
-        ));
+    // A dry run sends nothing, so it can go without a token; a name that isn't in the local copy
+    // then can't be looked up.
+    let api_key = match token::load_token() {
+        Some(api_key) => api_key,
+        None if args.dry_run => String::new(),
+        None => {
+            return fail(&format!(
+                "GODSPEED_TOKEN is not set (environment variable, or an `export GODSPEED_TOKEN=...` line in {})",
+                paths::token_file_path().display()
+            ));
+        }
     };
     debug!("edit: {args:?}");
 
@@ -878,19 +897,21 @@ pub fn run_edit(args: &[String]) -> ExitCode {
                 return exit::SUCCESS;
             }
         }
-        if changes.delete && !args.yes && !confirm_delete(&target, &mut input, &mut out) {
+        if changes.delete && !args.yes && !args.dry_run && !confirm_delete(&target, &mut input, &mut out) {
             eprintln!("Not deleted.");
             return exit::SUCCESS;
         }
         vec![target]
     };
-    if from_stdin && changes.delete && !args.yes {
+    if from_stdin && changes.delete && !args.yes && !args.dry_run {
         return fail("deleting the tasks whose ids are on stdin needs --yes");
     }
     debug!("changes: {changes:?}");
 
     // What is waiting from earlier goes first, so an older change can't overwrite this one.
-    pending::process(&api_key);
+    if !args.dry_run {
+        pending::process(&api_key);
+    }
 
     let resolved = match resolve(&changes, &api_key) {
         Ok(resolved) => resolved,
@@ -908,9 +929,9 @@ pub fn run_edit(args: &[String]) -> ExitCode {
     let mut results: Vec<(Target, Outcome)> = Vec::new();
     for target in targets {
         let edit = PendingEdit { id: target.id.clone(), title: target.title.clone(), patch: patch.clone(), delete: changes.delete };
-        let outcome = execute(&edit, &api_key);
+        let outcome = if args.dry_run { Outcome::DryRun } else { execute(&edit, &api_key) };
         if !args.json {
-            report(&target, &outcome, &changes, &resolved);
+            report(&target, &outcome, &changes, &resolved, patch.as_ref());
         }
         results.push((target, outcome));
     }
@@ -928,11 +949,20 @@ pub fn run_edit(args: &[String]) -> ExitCode {
                 if let Outcome::Queued(reason) | Outcome::Failed(reason) = outcome {
                     entry["error"] = json!(reason);
                 }
+                if *outcome == Outcome::DryRun {
+                    entry["patch"] = json!(patch);
+                    entry["known"] = json!(target.title.is_some());
+                }
                 entry
             })
             .collect();
         // Ignore a closed pipe.
         let _ = writeln!(io::stdout(), "{}", serde_json::to_string_pretty(&entries).expect("the results serialise"));
+    }
+    if args.dry_run {
+        let plural = if results.len() == 1 { "" } else { "s" };
+        eprintln!("Dry run: {} task{plural} would be changed; nothing was sent.", results.len());
+        return exit::SUCCESS;
     }
     if results.len() > 1 {
         let count = |word: &str| results.iter().filter(|(_, outcome)| outcome.word() == word).count();
@@ -946,8 +976,20 @@ pub fn run_edit(args: &[String]) -> ExitCode {
 }
 
 /// Says how a change went.
-fn report(target: &Target, outcome: &Outcome, changes: &Changes, resolved: &Resolved) {
+fn report(target: &Target, outcome: &Outcome, changes: &Changes, resolved: &Resolved, patch: Option<&Value>) {
     match outcome {
+        Outcome::DryRun => {
+            let unchecked = if target.title.is_none() { " (not in the local copy, so not checked)" } else { "" };
+            if changes.delete {
+                println!("Would delete '{}' ({}){unchecked}.", target.name(), target.id);
+            } else {
+                let fields: Vec<String> = patch
+                    .and_then(Value::as_object)
+                    .map(|object| object.iter().map(|(key, value)| format!("{key}={value}")).collect())
+                    .unwrap_or_default();
+                println!("Would update '{}' ({}){unchecked}: {}", target.name(), target.id, fields.join(" "));
+            }
+        }
         Outcome::Done if changes.delete => println!("Deleted '{}'.", target.name()),
         Outcome::Done => println!("{}", describe(changes, target.name(), resolved)),
         Outcome::Queued(reason) => eprintln!(

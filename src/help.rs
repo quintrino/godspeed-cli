@@ -209,9 +209,10 @@ pub const HELP: &str = r#"
 Create tasks in Godspeed, and search them, from the command line.
 
 ## USAGE
-> godspeed-cli add [--json] [--] <TASK>...
+> godspeed-cli add [OPTIONS] [--] <TASK>...
 > echo "<TASK>" | godspeed-cli add
-> godspeed-cli edit [--interactive] [OPTIONS] <ID | WORDS>...
+> godspeed-cli add --each < tasks.txt
+> godspeed-cli edit [--interactive] [--dry-run] [OPTIONS] <ID | WORDS>...
 > godspeed-cli show [--json] <ID | WORDS>...
 > godspeed-cli queue [--json | --count] | retry | drop <NUMBER>... | drop --all
 > godspeed-cli lists [--id | --ids-only | --count] [--json] [STRING]...
@@ -276,15 +277,31 @@ pub const ADD_HELP: &str = r#"
 Create a task in Godspeed.
 
 ## USAGE
-> godspeed-cli add [--json] [--] <TASK>...
-> echo "<TASK>" | godspeed-cli add [--json]
+> godspeed-cli add [OPTIONS] [--] <TASK>...
+> echo "<TASK>" | godspeed-cli add [OPTIONS]
+> godspeed-cli add --each [OPTIONS] < tasks.txt
 
 The task is the rest of the line. With no text it is read from stdin, so a task with several lines can be piped in. Quote the task so the shell leaves characters like ~ and @ alone (zsh can expand an unquoted ~).
 
+Options go straight after `add`, before the task. The first word that isn't an option starts the task, so `add Buy --json` creates a task with that title. Each option sets what the task syntax below can, or more, and wins over the same thing written in the task.
+
 ## OPTIONS
-- --json => Print the API's response to the new task, as JSON, on success. It must come straight after `add`; after the task text it is just text.
+- --due WHEN => Set the due date: tomorrow, friday, "friday 5pm", "in 2 days", 2026-10-31 or 20261031. A day with no time is a due date with no time. Replaces a :date in the task.
+- --duration LENGTH => Set the duration: 45 (minutes), 45m, 1.5h or "1 hour 30 minutes". Replaces a ~duration.
+- --list NAME => Put the task in a list, matched as  is below. Replaces an .
+- --label NAME => Add a label, matched as .label is below. Can be repeated, and adds to any .label in the task.
+- --notes TEXT => Set the notes. Replaces an "n:" in the task.
+- --snooze WHEN => Snooze the task until WHEN, written as for --due. A time in the past is refused.
+- --start WHEN => Set the start date, written as for --due.
+- --complete => Create the task already complete.
+- --each => Make a task of every argument, or, with none, of every line piped in, ignoring blank lines. The options apply to all of them. One that fails doesn't stop the others, and a summary is printed. Without it, the arguments are one task and so is all of stdin.
+- --dry-run => Show what would be created, and send nothing. Needs no token or network. List and label names are shown as written, not looked up. A task that would be rejected is reported as it would be.
+- --json => Print the API's response to the new task, as JSON, on success (with --each, an array of what happened to each task; with --dry-run, what would be created).
+- --debug => Print what the program is doing to stderr.
 - -- => End the options, so a task can start with --json, --help, -h, -V or --version.
 - -h, --help => Print this help and exit.
+
+The snooze, the start date and being complete can't be given when a task is created, so they are sent as a change to the new task straight after. If that can't be sent, the task still exists and the change is saved and sent by the next `add` or `edit`.
 
 ## TASK SYNTAX
 - .label => Add a label. Any number are allowed. A word that starts with a dot is always a label, so `.gitignore` is the label "gitignore".
@@ -317,10 +334,14 @@ If nothing matches, the task is still created, without that list or label. A tas
 > godspeed-cli add "Write blog post @Work .Writing ~2h :tomorrow n: Include code samples"
 > godspeed-cli add --json "Pay rent @Home :20261101" | jq -r .todo_item.id
 > echo "Plan the week @Work" | godspeed-cli add
+> godspeed-cli add --due friday --duration 45m --label Urgent "Call the bank"
+> godspeed-cli add --dry-run "Pay rent  :20261101"
+> godspeed-cli add --each --list Home "Buy milk" "Call mom"
+> godspeed-cli add --each --list Home < shopping.txt
 > godspeed-cli add -- --version bump
 
 ## IF THE TASK CAN'T BE SENT
-If the API can't be reached or refuses the task, the task is saved in the `cache` file in the data directory (usually ~/.local/share/godspeed-cli) and sent the next time `add` runs. Exit status 1 says it was queued. A task that can never be sent, such as one with two lists or no title, is rejected and never queued.
+If the API can't be reached or refuses the task, the task is saved, with its options, in the `cache` file in the data directory (usually ~/.local/share/godspeed-cli) and sent the next time `add` or `edit` runs. `godspeed-cli queue` shows what is waiting. Exit status 1 says it was queued. A task that can never be sent, such as one with two lists or no title, is rejected and never queued.
 
 ## ENVIRONMENT
 - GODSPEED_TOKEN => Your Godspeed API key. If it isn't set, an `export GODSPEED_TOKEN="..."` line in $XDG_DATA_HOME/environment/Godspeed is used.
@@ -560,6 +581,7 @@ With options and no task, the ids are read from stdin, one on each line, and eve
 > godspeed-cli edit 5a1b2c3d --add-label Urgent --remove-label Low
 > godspeed-cli edit 5a1b2c3d --delete --yes
 > godspeed-cli search 'due<today' --ids-only | godspeed-cli edit --snooze tomorrow
+> godspeed-cli search 'list:Someday' --ids-only | godspeed-cli edit --delete --dry-run
 
 ## OPTIONS
 - -i, --interactive => Choose the task from a list instead of giving its id. The incomplete tasks in the local copy are listed (20 at a time, most recently changed first); type a number to choose one, or type words to narrow the list to the titles containing them, or q to quit. WORDS given on the command line narrow it from the start. Then the menu appears, or the options are applied to the task you chose.
@@ -575,7 +597,8 @@ With options and no task, the ids are read from stdin, one on each line, and eve
 - --move LIST => Move to the list whose name is LIST, or starts with or contains it, ignoring case, spaces and dashes.
 - --delete => Delete the task, after asking. It can't be undone.
 - -y, --yes => Don't ask before deleting.
-- --json => Print what happened to each task as JSON: id, title, action, status (done, queued or failed) and error.
+- --dry-run => Show what would be done to each task, and do nothing: nothing is sent, asked, queued or changed in the local copy, and what is waiting in the queue isn't sent. It shows the changes as they would be sent (so --snooze tomorrow shows the date, and --move home the list's id), which is the way to check a pipe before running it. Doesn't need a token if the names are in the local copy. Deleting needs neither the question nor --yes.
+- --json => Print what happened to each task as JSON: id, title, action, status (done, queued, failed or dry-run) and error, and with --dry-run the patch.
 - --debug => Print what the program is doing to stderr. The token is never printed.
 - -- => End the options.
 - -h, --help => Print this help.
@@ -961,7 +984,7 @@ mod tests {
     fn the_add_help_explains_the_syntax_and_how_lists_and_labels_are_matched() {
         let text = wide(ADD_HELP);
         for needle in [
-            "godspeed-cli add [--json] [--] <TASK>...", "--json", "TASK SYNTAX", ".label", "@list", "~duration", ":date",
+            "godspeed-cli add [OPTIONS] [--] <TASK>...", "--json", "--dry-run", "--each", "--snooze", "TASK SYNTAX", ".label", "@list", "~duration", ":date",
             "n: text", "HOW LISTS AND LABELS ARE MATCHED", "ignoring case", "exact", "prefix", "contains", "no spaces",
             "@workprojects, @work-proj and @kproj all find \"Work Projects\"", "the shortest wins", "never picks \"Homework\"", "fetched from Godspeed again", "more than one @list",
             "no title", "EXAMPLES", "IF THE TASK CAN'T BE SENT", "EXIT STATUS", "GODSPEED_TOKEN", "lists.toml", "labels.toml",

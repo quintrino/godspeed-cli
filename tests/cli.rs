@@ -2038,7 +2038,7 @@ fn the_help_describes_add_as_the_only_way_to_create_a_task() {
     let help = sandbox.run_with(None, None, &["--help"], None);
 
     let text = stdout(&help);
-    assert!(text.contains("godspeed-cli add [--json] [--] <TASK>..."), "{text}");
+    assert!(text.contains("godspeed-cli add [OPTIONS] [--] <TASK>..."), "{text}");
     assert!(text.contains("echo \"<TASK>\" | godspeed-cli add"), "{text}");
     assert!(text.contains("There are no other commands"), "{text}");
     assert!(!text.contains("so `add` can be left out"), "add is no longer the default command: {text}");
@@ -2251,7 +2251,7 @@ fn bash_completes_commands_flags_and_shell_names() {
     assert_eq!(bash_complete(&sandbox, "godspeed-cli refresh --i", &["godspeed-cli", "refresh", "--i"]), vec!["--include-completed"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli search --", &["godspeed-cli", "search", "--"]), vec!["--json", "--id", "--ids-only", "--count", "--refresh", "--max-age", "--color", "--debug"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli search --m", &["godspeed-cli", "search", "--m"]), vec!["--max-age"]);
-    assert_eq!(bash_complete(&sandbox, "godspeed-cli add --", &["godspeed-cli", "add", "--"]), vec!["--json"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli add --", &["godspeed-cli", "add", "--"]), vec!["--json", "--dry-run", "--each", "--due", "--duration", "--snooze", "--start", "--notes", "--list", "--label", "--complete", "--debug"]);
     assert!(bash_complete(&sandbox, "godspeed-cli add --r", &["godspeed-cli", "add", "--r"]).is_empty());
     assert!(bash_complete(&sandbox, "godspeed-cli nonsense ", &["godspeed-cli", "nonsense", ""]).is_empty());
 }
@@ -2662,7 +2662,7 @@ fn bash_completes_the_color_flag_and_its_values() {
     assert_eq!(bash_complete(&sandbox, "godspeed-cli search --color ", &[g, "search", "--color", ""]), vec!["auto", "always", "never"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli search --color a", &[g, "search", "--color", "a"]), vec!["auto", "always"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli search --color n", &[g, "search", "--color", "n"]), vec!["never"]);
-    assert!(bash_complete(&sandbox, "godspeed-cli add --c", &[g, "add", "--c"]).is_empty(), "add has no --color");
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli add --c", &[g, "add", "--c"]), vec!["--complete"], "add has no --color");
 }
 
 // ---- the header row ----
@@ -2991,7 +2991,7 @@ fn add_and_refresh_have_their_own_help_and_it_is_not_the_general_help() {
     assert_ne!(add, refresh);
     assert_eq!(add, add_short);
     assert_eq!(refresh, refresh_short);
-    for needle in ["HOW LISTS AND LABELS ARE MATCHED:", "TASK SYNTAX:", "--json", "IF THE TASK CAN'T BE SENT:", "godspeed-cli add [--json] [--] <TASK>..."] {
+    for needle in ["HOW LISTS AND LABELS ARE MATCHED:", "TASK SYNTAX:", "--json", "IF THE TASK CAN'T BE SENT:", "godspeed-cli add [OPTIONS] [--] <TASK>..."] {
         assert!(add.contains(needle), "add --help lacks {needle}");
     }
     for needle in ["INCREMENTAL AND FULL:", "A REFRESH IS FULL WHEN:", "--full", "--include-completed", "cache.sqlite3", "godspeed-cli refresh [--full]"] {
@@ -4142,4 +4142,348 @@ fn the_new_commands_have_their_own_help() {
         assert!(stdout(&output).contains(needle), "{}", stdout(&output));
     }
     assert!(api.requests().is_empty());
+}
+
+// ---- add with options, --each and --dry-run, and edit --dry-run ----
+
+fn sent_requests(api: &MockApi) -> Vec<String> {
+    api.requests().iter().filter(|r| r.method != "GET").map(|r| format!("{} {}", r.method, r.path)).collect()
+}
+
+#[test]
+fn add_options_set_the_same_things_edit_can_change() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-options");
+
+    let output = sandbox.run(
+        &api,
+        &[
+            "add", "--due", "2099-10-31", "--duration", "1.5h", "--notes", "Ring them", "--list", "work", "--label", "Urgent",
+            "--label=Writing", "Pay", "rent",
+        ],
+    );
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let tasks = api.posted_tasks();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        tasks[0],
+        json!({"title": "Pay rent", "list_id": "list-work", "duration_minutes": 90, "timeless_due_at": "2099-10-31",
+               "label_ids": ["label-urgent", "label-writing"], "notes": "Ring them"})
+    );
+    assert_eq!(sent_requests(&api), vec!["POST /tasks"], "nothing needs a second request");
+}
+
+#[test]
+fn an_option_wins_over_the_same_thing_written_in_the_task_and_labels_add_up() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-options-win");
+
+    let output = sandbox.run(
+        &api,
+        &["add", "--due", "2099-01-02", "--duration", "45", "--list", "home", "--label", "Writing", "Buy milk @Work .Urgent ~10m :20990101 n: old"],
+    );
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let task = &api.posted_tasks()[0];
+    assert_eq!(task["timeless_due_at"], "2099-01-02");
+    assert_eq!(task["duration_minutes"], 45);
+    assert_eq!(task["list_id"], "list-home");
+    assert_eq!(task["label_ids"], json!(["label-urgent", "label-writing"]));
+    assert_eq!(task["notes"], "old", "no --notes, so the text's notes stay");
+}
+
+#[test]
+fn a_due_time_is_sent_as_a_moment() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-due-time");
+
+    let output = sandbox.run(&api, &["add", "--due", "2099-01-02 3pm", "Call mom"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let task = &api.posted_tasks()[0];
+    assert!(task["due_at"].as_str().unwrap().ends_with('Z'), "{task}");
+    assert!(task.get("timeless_due_at").is_none(), "{task}");
+}
+
+#[test]
+fn snooze_start_and_complete_are_sent_as_a_change_to_the_new_task() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-follow-up");
+
+    let output = sandbox.run(&api, &["add", "--snooze", "2099-01-05", "--start", "2099-01-03", "--complete", "Buy milk"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(sent_requests(&api), vec!["POST /tasks", "PATCH /tasks/new-task-id"]);
+    let patch: Value = serde_json::from_str(&requests_with(&api, "PATCH")[0].body).unwrap();
+    assert_eq!(patch, json!({"timeless_snoozed_until": "2099-01-05", "timeless_starts_at": "2099-01-03", "is_complete": true}));
+    let created = &api.posted_tasks()[0];
+    assert!(created.get("is_complete").is_none() && created.get("snoozed_until").is_none(), "{created}");
+}
+
+#[test]
+fn if_the_follow_up_cannot_be_sent_the_task_is_still_created_and_the_change_is_queued() {
+    let api = MockApi::start(200);
+    api.set_change_status(503);
+    let sandbox = Sandbox::new("add-follow-up-fails");
+
+    let output = sandbox.run(&api, &["add", "--complete", "Buy milk"]);
+
+    assert_eq!(code(&output), 0, "the task was created: {}", stderr(&output));
+    assert!(stderr(&output).contains("the task was created, but"), "{}", stderr(&output));
+    let queued = sandbox.queued_tasks();
+    assert_eq!(queued.len(), 1);
+    assert!(queued[0].starts_with("{\"queued_edit\":") && queued[0].contains("new-task-id"), "{}", queued[0]);
+
+    api.set_change_status(200);
+    let retry = sandbox.run(&api, &["queue", "retry"]);
+    assert_eq!(code(&retry), 0, "{}", stderr(&retry));
+    assert!(sandbox.queued_tasks().is_empty());
+}
+
+#[test]
+fn a_task_added_with_options_that_cannot_be_sent_is_queued_with_them() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-queued-with-options");
+
+    let failed = sandbox.run_with(
+        Some("http://127.0.0.1:1"),
+        Some("test-token"),
+        &["add", "--due", "tomorrow", "--complete", "--label", "Urgent", "Buy milk :today"],
+        None,
+    );
+
+    assert_eq!(code(&failed), 1);
+    let queued = sandbox.queued_tasks();
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert!(queued[0].starts_with("{\"queued_add\":"), "{}", queued[0]);
+    assert!(!queued[0].contains(":today"), "relative dates in the text are made absolute: {}", queued[0]);
+    let listing = sandbox.run(&api, &["queue"]);
+    assert!(stdout(&listing).contains("add   Buy milk :20"), "{}", stdout(&listing));
+    assert!(stdout(&listing).contains("[labels Urgent, due 20"), "{}", stdout(&listing));
+
+    let retried = sandbox.run(&api, &["queue", "retry"]);
+
+    assert_eq!(code(&retried), 0, "{}", stderr(&retried));
+    let task = &api.posted_tasks()[0];
+    assert_eq!(task["label_ids"], json!(["label-urgent"]));
+    assert!(task["timeless_due_at"].as_str().is_some());
+    assert_eq!(requests_with(&api, "PATCH").len(), 1, "and its follow-up went too");
+    assert!(sandbox.queued_tasks().is_empty());
+}
+
+#[test]
+fn each_makes_a_task_of_every_argument() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-each-args");
+
+    let output = sandbox.run(&api, &["add", "--each", "--label", "Urgent", "Buy milk", "Call mom @Home"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let tasks = api.posted_tasks();
+    assert_eq!(tasks.iter().map(|t| t["title"].as_str().unwrap()).collect::<Vec<_>>(), vec!["Buy milk", "Call mom"]);
+    assert!(tasks.iter().all(|t| t["label_ids"] == json!(["label-urgent"])), "the options apply to every task");
+    assert!(stderr(&output).contains("2 created, 0 queued, 0 rejected."), "{}", stderr(&output));
+}
+
+#[test]
+fn each_makes_a_task_of_every_line_piped_in_and_without_it_the_lines_are_one_task() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-each-stdin");
+
+    let each = sandbox.run_stdin(&api, &["add", "--each", "--due", "2099-01-01"], "Buy milk\n\n  Call mom  \nPay rent :20990202\n");
+    let one = sandbox.run_stdin(&api, &["add"], "Plan the week\nAgenda\n");
+
+    assert_eq!(code(&each), 0, "{}", stderr(&each));
+    let tasks = api.posted_tasks();
+    assert_eq!(tasks.iter().map(|t| t["title"].as_str().unwrap()).collect::<Vec<_>>(), vec!["Buy milk", "Call mom", "Pay rent", "Plan the week Agenda"]);
+    assert_eq!(tasks[2]["timeless_due_at"], "2099-01-01", "the option replaces the text's date");
+    assert_eq!(code(&one), 0);
+}
+
+#[test]
+fn each_carries_on_past_a_task_that_is_rejected_and_says_so() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-each-rejected");
+
+    let output = sandbox.run_stdin(&api, &["add", "--each"], "Buy milk\nTwo lists @Home @Work\nCall mom\n");
+
+    assert_eq!(code(&output), 2);
+    assert_eq!(api.posted_tasks().len(), 2);
+    assert!(stderr(&output).contains("Multiple lists specified"), "{}", stderr(&output));
+    assert!(stderr(&output).contains("2 created, 0 queued, 1 rejected."), "{}", stderr(&output));
+    assert!(sandbox.queued_tasks().is_empty(), "a rejected task is never queued");
+}
+
+#[test]
+fn each_json_reports_every_task_and_nothing_piped_in_is_an_empty_array() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-each-json");
+
+    let output = sandbox.run_stdin(&api, &["add", "--each", "--json"], "Buy milk\nNo @Two @Lists\n");
+    let empty = sandbox.run_stdin(&api, &["add", "--each", "--json"], "\n\n");
+
+    let report: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(report[0]["status"], "created");
+    assert_eq!(report[0]["response"]["todo_item"]["id"], "new-task-id");
+    assert_eq!(report[1]["status"], "rejected");
+    assert!(report[1]["error"].as_str().unwrap().contains("Multiple lists"), "{report}");
+    assert_eq!(stdout(&empty), "[]\n");
+}
+
+#[test]
+fn a_failed_each_queues_the_tasks_that_could_not_be_sent() {
+    let sandbox = Sandbox::new("add-each-unreachable");
+
+    let output =
+        sandbox.run_with(Some("http://127.0.0.1:1"), Some("test-token"), &["add", "--each", "Buy milk", "Call mom"], None);
+
+    assert_eq!(code(&output), 1);
+    assert_eq!(sandbox.queued_tasks(), vec!["Buy milk", "Call mom"]);
+    assert!(stderr(&output).contains("0 created, 2 queued, 0 rejected."), "{}", stderr(&output));
+}
+
+#[test]
+fn add_dry_run_shows_what_would_be_created_and_sends_nothing_not_even_needing_a_token() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-dry-run");
+    sandbox.write_queue(&["Waiting task"]);
+
+    let output = sandbox.run_with(
+        Some(&api.url),
+        None,
+        &["add", "--dry-run", "--due", "2099-10-31", "--snooze", "2099-11-02", "--complete", "--label", "Low", "Pay rent @Home .Urgent ~30m n: ring them"],
+        None,
+    );
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "Would create 'Pay rent'\n  list      Home\n  labels    Urgent, Low\n  due       2099-10-31\n  snoozed   2099-11-02\n  duration  30m\n  status    complete\n  notes     ring them\n"
+    );
+    assert!(stderr(&output).contains("Dry run: nothing was sent."), "{}", stderr(&output));
+    assert!(api.requests().is_empty());
+    assert_eq!(sandbox.queued_tasks(), vec!["Waiting task"], "the queue is left alone");
+}
+
+#[test]
+fn add_dry_run_json_and_each_and_a_rejected_task() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-dry-run-json");
+
+    let one = sandbox.run(&api, &["add", "--dry-run", "--json", "Buy milk :20990101"]);
+    let many = sandbox.run_stdin(&api, &["add", "--dry-run", "--each", "--json"], "A\nB @x\n");
+    let bad = sandbox.run(&api, &["add", "--dry-run", "Two @a @b"]);
+
+    assert_eq!(serde_json::from_str::<Value>(&stdout(&one)).unwrap(), json!({"title": "Buy milk", "timeless_due_at": "2099-01-01"}));
+    assert_eq!(serde_json::from_str::<Value>(&stdout(&many)).unwrap(), json!([{"title": "A"}, {"title": "B", "list": "x"}]));
+    assert_eq!(code(&bad), 2);
+    assert!(stderr(&bad).contains("Multiple lists specified"), "{}", stderr(&bad));
+    assert!(api.requests().is_empty());
+}
+
+#[test]
+fn bad_add_options_are_refused_before_anything_is_sent() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-bad-options");
+
+    for args in [
+        &["add", "--due", "someday", "Buy milk"][..],
+        &["add", "--duration", "soon", "Buy milk"],
+        &["add", "--snooze", "2020-01-01", "Buy milk"],
+        &["add", "--due"],
+        &["add", "--list", " ", "Buy milk"],
+    ] {
+        let output = sandbox.run(&api, args);
+        assert_eq!(code(&output), 2, "{args:?}: {}", stderr(&output));
+    }
+    assert!(api.requests().is_empty());
+}
+
+#[test]
+fn debug_still_works_among_the_options_of_add_and_is_text_after_them() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-debug-among-options");
+
+    let among = sandbox.run(&api, &["add", "--due", "2099-01-01", "--debug", "Buy milk"]);
+    let in_text = sandbox.run(&api, &["add", "--due", "2099-01-01", "Fix --debug"]);
+    let as_value = sandbox.run(&api, &["add", "--notes", "--debug", "Buy tea"]);
+
+    assert!(stderr(&among).contains("[debug]"), "{}", stderr(&among));
+    assert!(!stderr(&in_text).contains("[debug]"));
+    assert!(!stderr(&as_value).contains("[debug]"), "a value that looks like an option is the value");
+    let titles: Vec<String> = api.posted_tasks().iter().map(|t| t["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(titles, vec!["Buy milk", "Fix --debug", "Buy tea"]);
+    assert_eq!(api.posted_tasks()[2]["notes"], "--debug");
+}
+
+#[test]
+fn edit_dry_run_shows_what_would_be_sent_and_changes_nothing() {
+    let (sandbox, api) = sample_copy("edit-dry-run");
+    let before = api.requests().len();
+
+    let output = sandbox.run(&api, &["edit", "t3", "--complete", "--due", "2099-01-05", "--add-label", "writing", "--dry-run"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "Would update 'Buy milk' (t3): add_label_ids=[\"label-writing\"] is_complete=true timeless_due_at=\"2099-01-05\"\n"
+    );
+    assert!(stderr(&output).contains("Dry run: 1 task would be changed; nothing was sent."), "{}", stderr(&output));
+    assert!(requests_with(&api, "PATCH").is_empty());
+    assert!(
+        api.requests().iter().skip(before).all(|r| r.method == "GET" && r.path == "/labels"),
+        "only the label lookup was asked of the API"
+    );
+    assert_eq!(ids_in_json(&search(&sandbox, &["--json", "milk"])), vec!["t3"], "the local copy is unchanged");
+    assert!(sandbox.queued_tasks().is_empty());
+}
+
+#[test]
+fn edit_dry_run_of_a_bulk_delete_needs_no_yes_and_deletes_nothing() {
+    let (sandbox, api) = sample_copy("edit-dry-run-bulk");
+    let ids = stdout(&search(&sandbox, &["--ids-only", "list:Home"]));
+
+    let output = sandbox.run_stdin(&api, &["edit", "--delete", "--dry-run"], &ids);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(lines(&output), vec!["Would delete 'Pay rent' (t1).", "Would delete 'Buy milk' (t3)."]);
+    assert!(stderr(&output).contains("Dry run: 2 tasks would be changed; nothing was sent."), "{}", stderr(&output));
+    assert!(requests_with(&api, "DELETE").is_empty());
+    assert_eq!(ids_in_json(&search(&sandbox, &["--json", "list:Home"])).len(), 2);
+}
+
+#[test]
+fn edit_dry_run_does_not_ask_does_not_send_the_queue_and_needs_no_token_for_known_names() {
+    let (sandbox, api) = sample_copy("edit-dry-run-offline");
+    sandbox.write_queue(&["Waiting task"]);
+    let before = api.requests().len();
+
+    let output = sandbox.run_with(Some(&api.url), None, &["edit", "t3", "--move", "work", "--dry-run"], None);
+    let unknown = sandbox.run_with(Some(&api.url), None, &["edit", "t3", "--add-label", "writing", "--dry-run"], None);
+    let delete = sandbox.run(&api, &["edit", "t3", "--delete", "--dry-run"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(stdout(&output).contains("list_id=\"list-work\""), "{}", stdout(&output));
+    assert_eq!(code(&unknown), 2);
+    assert!(stderr(&unknown).contains("no token"), "{}", stderr(&unknown));
+    assert_eq!(code(&delete), 0, "no question was asked: {}", stderr(&delete));
+    assert_eq!(sandbox.queued_tasks(), vec!["Waiting task"], "the queue is left alone");
+    assert!(api.requests().iter().skip(before).all(|r| r.method == "GET"), "nothing was sent");
+}
+
+#[test]
+fn edit_dry_run_json_and_an_id_the_copy_does_not_know() {
+    let (sandbox, api) = sample_copy("edit-dry-run-json");
+
+    let known = sandbox.run(&api, &["edit", "t3", "--title", "Tea", "--dry-run", "--json"]);
+    let unknown = sandbox.run(&api, &["edit", "t99", "--complete", "--dry-run"]);
+
+    let report: Value = serde_json::from_str(&stdout(&known)).unwrap();
+    assert_eq!(
+        report,
+        json!([{"id": "t3", "title": "Buy milk", "action": "update", "status": "dry-run", "patch": {"title": "Tea"}, "known": true}])
+    );
+    assert!(stdout(&unknown).contains("(not in the local copy, so not checked)"), "{}", stdout(&unknown));
+    assert!(requests_with(&api, "PATCH").is_empty());
 }

@@ -12,6 +12,8 @@ pub struct TaskRequest {
     pub duration_minutes: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeless_due_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub label_ids: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -167,6 +169,7 @@ pub fn parse_task_on(input: &str, today: NaiveDate) -> ParsedTask {
             list_id: None, // Will be resolved later
             duration_minutes,
             timeless_due_at,
+            due_at: None,
             label_ids: Vec::new(), // Will be resolved later
             notes,
         },

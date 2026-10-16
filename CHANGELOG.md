@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.15.0: 2026-10-16
+
+### Added
+
+- **`add` takes the same things `edit` changes**, as options straight after `add`: `--due`, `--duration`, `--list`, `--label` (repeatable), `--notes`, `--snooze`, `--start` and `--complete`. Dates are read as `edit` reads them (`tomorrow`, `"friday 5pm"`, `2026-10-31`). An option wins over the same thing written in the task, and `--label` adds to any `.label`.
+  - A snooze, a start date and being complete can't be given when a task is created, so they are sent as a change to the new task straight after. If that can't be sent, the task still exists and the change is queued.
+  - A task that can't be sent is queued with its options.
+- **`add --each`** makes a task of every argument, or of every line piped in, so `godspeed-cli add --each --list Inbox < todo.txt` works. One failing doesn't stop the others; a summary is printed, and `--json` gives each task's status.
+- **`add --dry-run`** shows what would be created and sends nothing, with no token or network needed.
+- **`edit --dry-run`** shows what would be done to each task, as it would be sent, and does nothing: nothing is sent, asked, queued, or changed in the local copy. Use it to check a pipe such as `search ... --ids-only | edit --delete` first.
+
+### Changed
+
+- Options of `add` must come straight after `add`, as `--json` always had to. A task that starts with one of the new options (`--due`, `--list`, ...) now needs `add -- ...`.
+- `queue` shows a waiting task's options next to its text.
+
 ## 0.14.0: 2026-10-16
 
 ### Added
