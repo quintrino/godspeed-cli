@@ -251,17 +251,34 @@ fn task_json(task: &StoredTask, ctx: &Context) -> Value {
     value
 }
 
-/// Sorts, limits and groups `tasks` as the query asks, and formats the result. The table has
+/// Keeps the first `limit` tasks, counting them group by group in the order the groups are shown,
+/// and drops the groups that are left empty. A group the limit cuts through keeps its first tasks.
+fn limit_groups(groups: &mut Vec<Group<'_>>, limit: usize) {
+    let mut remaining = limit;
+    for group in groups.iter_mut() {
+        group.tasks.truncate(remaining);
+        remaining -= group.tasks.len();
+    }
+    groups.retain(|group| !group.tasks.is_empty());
+}
+
+/// Sorts, groups and limits `tasks` as the query asks, and formats the result. The table has
 /// a header row; with `group:` each group gets a heading and a count instead. In JSON, the
 /// result is an array of tasks, or of `{"group", "tasks"}` objects when grouping. Every task
 /// also gets `list_names` and `label_names`.
+///
+/// `limit:` counts tasks in the order they are shown. With `group:` that means the first groups
+/// are kept, so a group listed first (`group:label:Eternal|...`) is never cut to make room for a
+/// later one, however the tasks inside it sort.
 pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: bool) -> String {
     sort_tasks(&mut tasks, &query.sorts, ctx);
-    if let Some(limit) = query.limit {
-        tasks.truncate(limit);
-    }
 
-    let groups = query.group.as_ref().map(|spec| group_tasks(&tasks, spec, query.duplicates, ctx));
+    let mut groups = query.group.as_ref().map(|spec| group_tasks(&tasks, spec, query.duplicates, ctx));
+    match (&mut groups, query.limit) {
+        (Some(groups), Some(limit)) => limit_groups(groups, limit),
+        (None, Some(limit)) => tasks.truncate(limit),
+        (_, None) => {}
+    }
 
     if json {
         let value = match groups {
@@ -634,6 +651,58 @@ mod tests {
             task("c", json!({"list_id": "l-work"})),
         ];
         assert_eq!(ids(&run("group:list limit:2", &tasks)).len(), 2);
+    }
+
+    #[test]
+    fn the_limit_is_applied_after_grouping_so_a_first_group_is_never_cut_for_a_later_one() {
+        // Undated tasks sort last, so a limit applied before grouping would drop them.
+        let mut tasks: Vec<StoredTask> =
+            (0..10).map(|i| task(&format!("dated{i}"), json!({"list_id": "l-home", "timeless_due_at": "2020-01-01"}))).collect();
+        tasks.extend((0..3).map(|i| task(&format!("undated{i}"), json!({"list_id": "l-work"}))));
+
+        let out = run("group:list:Work|Home sort:due limit:5", &tasks);
+
+        assert_eq!(headings(&out), vec!["Work (3)", "Home (2)"], "{out}");
+        assert_eq!(ids(&out), vec!["undated0", "undated1", "undated2", "dated0", "dated1"]);
+    }
+
+    #[test]
+    fn the_limit_cuts_through_a_group_and_drops_the_groups_after_it() {
+        let tasks = [
+            task("a", json!({"list_id": "l-work"})),
+            task("b", json!({"list_id": "l-work"})),
+            task("c", json!({"list_id": "l-work"})),
+            task("d", json!({"list_id": "l-home"})),
+        ];
+
+        let out = run("group:list:Work|Home limit:2", &tasks);
+
+        assert_eq!(headings(&out), vec!["Work (2)"], "the count is of what is shown: {out}");
+        assert_eq!(ids(&out), vec!["a", "b"]);
+        assert_eq!(json_groups("group:list:Work|Home limit:2", &tasks), vec![("Work".to_string(), 2)]);
+        assert_eq!(json_groups("group:list:Work|Home limit:4", &tasks), vec![("Work".to_string(), 3), ("Home".to_string(), 1)]);
+        assert_eq!(json_groups("group:list:Work|Home limit:0", &tasks), vec![]);
+        assert_eq!(json_groups("group:list:Work|Home limit:99", &tasks).len(), 2);
+    }
+
+    fn json_groups(text: &str, tasks: &[StoredTask]) -> Vec<(String, usize)> {
+        let out = render(&query(text), tasks.iter().collect(), &context(), true);
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        parsed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| (g["group"].as_str().unwrap().to_string(), g["tasks"].as_array().unwrap().len()))
+            .collect()
+    }
+
+    #[test]
+    fn the_limit_counts_a_task_once_for_each_group_it_is_shown_in() {
+        let tasks = [task("both", json!({"label_ids": ["x-low", "x-high"]})), task("one", json!({"label_ids": ["x-low"]}))];
+
+        let out = run("group:label:High|Low enable:duplicates limit:2", &tasks);
+
+        assert_eq!(headings(&out), vec!["High (1)", "Low (1)"], "the same task shown twice uses two places: {out}");
     }
 
     #[test]

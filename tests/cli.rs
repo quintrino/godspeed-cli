@@ -2373,3 +2373,111 @@ fn the_generated_scripts_are_valid_for_the_shells_that_are_installed() {
     }
     assert!(checked >= 1 || !have("/bin/bash"), "bash is checked whenever it exists");
 }
+
+
+// ---- limit comes after grouping ----
+
+/// An account like the one this was reported on: a few undated "Eternal" tasks, and many
+/// overdue ones.
+fn eternal_account(name: &str) -> (Sandbox, MockApi) {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new(name);
+    let lists = json!([{"id": "l-a", "name": "Alpha"}, {"id": "l-b", "name": "Beta"}]);
+    let labels = json!([
+        {"id": "x-eternal", "name": "Eternal"}, {"id": "x-vital", "name": "Vital"}, {"id": "x-high", "name": "high"},
+        {"id": "x-med", "name": "medium"}, {"id": "x-low", "name": "low"}, {"id": "x-wait", "name": "Waiting For"},
+        {"id": "x-sub", "name": "subtask"},
+    ]);
+    let task = |id: String, labels: Value, due: Option<&str>| {
+        let mut v = json!({"id": id, "title": format!("Task {id}"), "list_id": "l-a", "label_ids": labels,
+                           "updated_at": "2026-03-01T00:00:00Z"});
+        if let Some(due) = due {
+            v["timeless_due_at"] = json!(due);
+        }
+        v
+    };
+    let mut tasks = vec![
+        task("e1".into(), json!(["x-eternal"]), None),
+        task("e2".into(), json!(["x-eternal", "x-wait"]), None),
+        task("e3".into(), json!(["x-eternal", "x-sub"]), None),
+        task("e4".into(), json!(["x-eternal", "x-high"]), None),
+        task("waiting".into(), json!(["x-wait"]), Some("2020-01-01")),
+    ];
+    // Sixty overdue tasks: more than the limit, and sorted before any task with no due date.
+    for i in 0..60 {
+        let label = if i % 2 == 0 { "x-high" } else { "x-low" };
+        tasks.push(task(format!("late{i:02}"), json!([label]), Some("2020-01-01")));
+    }
+    api.queue_page_with(tasks, lists, labels);
+    let output = sandbox.run(&api, &["refresh"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    (sandbox, api)
+}
+
+const ETERNAL_QUERY: &str = "label:\"Eternal\" | due<=today sort-asc:list group:label:Eternal|Vital|high|medium|low \
+                             sort:due -label:\"Waiting For\" -label:subtask limit:40";
+
+#[test]
+fn the_reported_query_returns_all_the_eternal_tasks_within_the_limit() {
+    let (sandbox, _api) = eternal_account("eternal-limit");
+
+    let output = search(&sandbox, &[ETERNAL_QUERY, "--json"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let groups: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(groups[0]["group"], "Eternal", "the first target comes first");
+    let eternal: Vec<&str> = groups[0]["tasks"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+    assert_eq!(eternal.len(), 4, "all four Eternal tasks: {eternal:?}");
+    for id in ["e1", "e2", "e3", "e4"] {
+        assert!(eternal.contains(&id), "{id} is missing: {eternal:?}");
+    }
+    let total: usize = groups.as_array().unwrap().iter().map(|g| g["tasks"].as_array().unwrap().len()).sum();
+    assert_eq!(total, 40, "the limit still caps the whole result");
+}
+
+#[test]
+fn the_limit_counts_tasks_in_the_order_they_are_shown() {
+    let (sandbox, _api) = eternal_account("eternal-limit-table");
+
+    let output = search(&sandbox, &[ETERNAL_QUERY]);
+
+    let text = stdout(&output);
+    let headings: Vec<&str> = text.lines().filter(|l| !l.starts_with("Task") && l.ends_with(')')).collect();
+    assert_eq!(headings[0], "Eternal (4)", "{text}");
+    assert_eq!(text.lines().filter(|l| l.starts_with("Task")).count(), 40, "{text}");
+    // 30 `high` and 30 `low` tasks are overdue: the limit takes all the `high` ones and then 6 `low`.
+    assert_eq!(headings, vec!["Eternal (4)", "high (30)", "low (6)"], "{text}");
+}
+
+#[test]
+fn without_a_group_the_limit_still_follows_the_sort() {
+    let (sandbox, _api) = eternal_account("eternal-limit-ungrouped");
+
+    let output = search(&sandbox, &["label:Eternal | due<=today", "sort:due", "limit:5", "--json"]);
+
+    let tasks: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let ids: Vec<&str> = tasks.as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+    assert_eq!(ids.len(), 5);
+    assert!(ids.iter().all(|id| id.starts_with("late") || id.starts_with("waiting")), "dated tasks come first: {ids:?}");
+}
+
+#[test]
+fn the_negations_after_the_or_only_apply_to_the_right_hand_side() {
+    let (sandbox, _api) = eternal_account("eternal-precedence");
+
+    let output = search(&sandbox, &["label:Eternal | due<=today -label:\"Waiting For\" -label:subtask", "--json"]);
+
+    let tasks: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let ids: Vec<&str> = tasks.as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+    // `a | b c d` is `a | (b c d)`: e2 (Waiting For) and e3 (subtask) are Eternal, so they stay.
+    for id in ["e1", "e2", "e3", "e4"] {
+        assert!(ids.contains(&id), "{id}: {ids:?}");
+    }
+    assert!(!ids.contains(&"waiting"), "the Waiting For task is only reached through the right-hand side");
+
+    let grouped = search(&sandbox, &["(label:Eternal | due<=today) -label:\"Waiting For\" -label:subtask", "--json"]);
+    let tasks: Value = serde_json::from_str(&stdout(&grouped)).unwrap();
+    let ids: Vec<&str> = tasks.as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"e1") && ids.contains(&"e4"));
+    assert!(!ids.contains(&"e2") && !ids.contains(&"e3"), "with parentheses the negations apply to everything: {ids:?}");
+}

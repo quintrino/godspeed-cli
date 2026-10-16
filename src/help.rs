@@ -96,6 +96,7 @@ MATCHING:
     a | b                Either
     !a  or  -a           Not a. Works on words, phrases and every operator below
     ( ... )              Grouping, which can be nested. | binds loosest, then AND, then !
+                         So  a | b c  means  a | (b c),  and  (a | b) c  means both a and b get c.
     Anything that looks like operator:value but isn't an operator below is a plain word.
 
 TITLE, NOTES, ATTACHMENT:
@@ -153,7 +154,10 @@ SORTING:
         title, label, duration, snooze-count, or list (the order of your sidebar; also
         indent-level). Tasks without a value come last.
         label and list take a target list, as in sort:label:High|Medium|Low
-    limit:N              At most N tasks, after sorting
+    limit:N              At most N tasks, counted in the order they are shown: after sorting and,
+                         with group:, group by group. The first groups are kept, so a group you
+                         list first (group:label:Eternal|...) is never cut to make room for a
+                         later one. Groups the limit never reaches are not shown.
 
 NESTED AND DUPLICATE TASKS:
     enable:duplicates  disable:duplicates   With duplicates on, a task with several labels,

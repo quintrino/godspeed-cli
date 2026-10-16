@@ -329,9 +329,13 @@ godspeed-cli search --max-age never milk       # never, whatever the settings fi
 | `is:uncleared` | Completed but not yet cleared (never an incomplete task) |
 | `sort:` `sort-asc:` `sort-desc:` | `due` `first-due` `snoozed` `start` `created` `modified` `title` `label` `duration` `snooze-count` `list`. Ascending by default; repeat to sort by several |
 | `group:` | `list` `label` `label-group` `due` `start` `due-or-start` `created` |
-| `limit:N` | At most N tasks, after sorting |
+| `limit:N` | At most N tasks, counted in the order they are shown: after sorting and, with `group:`, group by group, so the first groups are kept (see below) |
 | `enable:duplicates` `disable:duplicates` | Whether a task with several labels, label groups or lists appears under each when grouping |
 | `enable:nested` `disable:nested` | Accepted; results are always a flat list |
+
+**`limit:` and groups.** The limit counts tasks in the order they are shown, so with `group:` it keeps the first groups and cuts the later ones. A group you list first is therefore never dropped to make room for another, however its tasks sort. For example `due<=today group:label:Eternal|Vital|high|medium|low sort:due limit:40` shows the Eternal tasks first even if they have no due date and there are hundreds of overdue tasks, and spends whatever is left of the 40 on the later groups. Heading counts, like `high (30)`, are of the tasks shown. A task that appears under several groups (with `enable:duplicates`) uses one place for each.
+
+**`|` and spaces.** `a | b c` means `a | (b c)`, because `|` binds loosest. So in `label:Eternal | due<=today -label:subtask`, the `-label:subtask` only applies to the `due<=today` side, and an Eternal task that is also a subtask is still found. To apply a term to both sides, use parentheses: `(label:Eternal | due<=today) -label:subtask`.
 
 Names and ids: `list:`, `folder:`, `in:`, `label:` and `label-group:` take part of a name, or an id (the whole id). Quote names that contain spaces: `in:"engineering q2"`.
 
