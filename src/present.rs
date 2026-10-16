@@ -314,7 +314,7 @@ fn table_rows(tasks: &[&StoredTask], ctx: &Context, color: bool, show_id: bool) 
         .collect()
 }
 
-fn task_json(task: &StoredTask, ctx: &Context) -> Value {
+pub fn task_json(task: &StoredTask, ctx: &Context) -> Value {
     let mut value = task.json.clone();
     if let Some(object) = value.as_object_mut() {
         object.insert("list_names".to_string(), json!(ctx.list_names(&task.json)));
@@ -366,19 +366,29 @@ fn arrange<'a>(query: &Query, tasks: &mut Vec<&'a StoredTask>, ctx: &Context) ->
 
 /// Just the ids of the results, one per line, in the order the table would show them (grouped
 /// tasks follow group by group), each id once. For `search --ids-only`, to pipe into `edit`.
-pub fn render_ids(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context) -> String {
+pub fn render_ids(query: &Query, tasks: Vec<&StoredTask>, ctx: &Context) -> String {
+    result_ids(query, tasks, ctx).join("\n")
+}
+
+/// How many tasks the search finds, after `limit:`. A task that is in several groups counts once.
+/// For `search --count`.
+pub fn count(query: &Query, tasks: Vec<&StoredTask>, ctx: &Context) -> usize {
+    result_ids(query, tasks, ctx).len()
+}
+
+/// The ids of the results in the order they are shown, each once.
+fn result_ids<'a>(query: &Query, mut tasks: Vec<&'a StoredTask>, ctx: &Context) -> Vec<&'a str> {
     let groups = arrange(query, &mut tasks, ctx);
-    let ordered: Vec<&StoredTask> = match groups {
+    let ordered: Vec<&'a StoredTask> = match groups {
         Some(groups) => groups.into_iter().flat_map(|group| group.tasks).collect(),
         None => tasks,
     };
     let mut seen = std::collections::HashSet::new();
-    let ids: Vec<&str> = ordered
+    ordered
         .iter()
         .filter_map(|task| task.json.get("id").and_then(Value::as_str))
         .filter(|id| seen.insert(*id))
-        .collect();
-    ids.join("\n")
+        .collect()
 }
 
 /// [`render`], and with `show_id` the table has a last column with each task's id. (JSON always

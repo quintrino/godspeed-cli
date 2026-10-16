@@ -150,16 +150,18 @@ _godspeed_cli() {
     local line=${COMP_LINE:0:COMP_POINT} word lead rest kind= op= typed head
     COMPREPLY=()
     if [[ $COMP_CWORD -eq 1 ]]; then
-        COMPREPLY=($(compgen -W "add edit lists labels refresh search completions --help --version" -- "$cur"))
+        COMPREPLY=($(compgen -W "add edit show queue lists labels refresh search completions --help --version" -- "$cur"))
         return
     fi
     case $cmd in
         refresh) COMPREPLY=($(compgen -W "--full --include-completed --json" -- "$cur")); return ;;
-        edit) COMPREPLY=($(compgen -W "--title --notes --complete --incomplete --due --duration --add-label --remove-label --snooze --move --delete --yes --json --debug" -- "$cur")); return ;;
-        lists|labels) COMPREPLY=($(compgen -W "--id --ids-only --json --color --debug" -- "$cur")); return ;;
+        edit) COMPREPLY=($(compgen -W "--interactive --title --notes --complete --incomplete --due --duration --add-label --remove-label --snooze --move --delete --yes --json --debug" -- "$cur")); return ;;
+        show) COMPREPLY=($(compgen -W "--json --debug" -- "$cur")); return ;;
+        queue) COMPREPLY=($(compgen -W "list retry drop --json --count --all --yes --debug" -- "$cur")); return ;;
+        lists|labels) COMPREPLY=($(compgen -W "--id --ids-only --count --json --color --debug" -- "$cur")); return ;;
         completions) COMPREPLY=($(compgen -W "bash fish zsh" -- "$cur")); return ;;
         add) flags="--json" ;;
-        search) flags="--json --id --ids-only --refresh --max-age --color --debug" ;;
+        search) flags="--json --id --ids-only --count --refresh --max-age --color --debug" ;;
         *) return ;;
     esac
     if [[ $cmd == search && ${COMP_WORDS[COMP_CWORD-1]} == --color ]]; then
@@ -221,7 +223,7 @@ _godspeed_cli_words() {
         if [[ $cmd == add ]]; then
             compadd -- --json
         else
-            compadd -- --json --id --ids-only --refresh --max-age --color --debug
+            compadd -- --json --id --ids-only --count --refresh --max-age --color --debug
         fi
         return
     fi
@@ -247,6 +249,8 @@ _godspeed_cli() {
     commands=(
         'add:create a task'
         'edit:edit, complete, snooze, delete or move a task'
+        'show:show everything about one task'
+        'queue:show or send what is waiting to be sent'
         'lists:show your lists'
         'labels:show your labels'
         'refresh:update the local copy of your tasks'
@@ -260,8 +264,10 @@ _godspeed_cli() {
     fi
     case $words[2] in
         refresh) compadd -- --full --include-completed --json ;;
-        edit) compadd -- --title --notes --complete --incomplete --due --duration --add-label --remove-label --snooze --move --delete --yes --json --debug ;;
-        lists|labels) compadd -- --id --ids-only --json --color --debug ;;
+        edit) compadd -- --interactive --title --notes --complete --incomplete --due --duration --add-label --remove-label --snooze --move --delete --yes --json --debug ;;
+        show) compadd -- --json --debug ;;
+        queue) compadd -- list retry drop --json --count --all --yes --debug ;;
+        lists|labels) compadd -- --id --ids-only --count --json --color --debug ;;
         completions) compadd -- bash fish zsh ;;
         add|search) _godspeed_cli_words ;;
     esac
@@ -319,6 +325,8 @@ end
 complete -c godspeed-cli -f
 complete -c godspeed-cli -n __fish_use_subcommand -a add -d 'Create a task'
 complete -c godspeed-cli -n __fish_use_subcommand -a edit -d 'Edit, complete, snooze, delete or move a task'
+complete -c godspeed-cli -n __fish_use_subcommand -a show -d 'Show everything about one task'
+complete -c godspeed-cli -n __fish_use_subcommand -a queue -d 'Show or send what is waiting to be sent'
 complete -c godspeed-cli -n __fish_use_subcommand -a lists -d 'Show your lists'
 complete -c godspeed-cli -n __fish_use_subcommand -a labels -d 'Show your labels'
 complete -c godspeed-cli -n __fish_use_subcommand -a refresh -d 'Update the local copy of your tasks'
@@ -344,10 +352,16 @@ complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l add-label -x -
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l remove-label -x -a '(godspeed-cli __complete labels)' -d 'Remove a label'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l json -d 'Print the results as JSON'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from search lists labels' -l ids-only -d 'Print only the ids'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from search lists labels queue' -l count -d 'Print only the count'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from show queue' -l json -d 'Print JSON'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from queue' -a 'list retry drop'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from queue' -l all -d 'Drop everything'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from queue' -l yes -d 'Do not ask'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l interactive -s i -d 'Choose the task from a list'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l move -x -a '(godspeed-cli __complete lists)' -d 'Move to a list'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l delete -d 'Delete the task'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from edit' -l yes -d 'Do not ask before deleting'
-complete -c godspeed-cli -n '__fish_seen_subcommand_from add edit lists labels refresh search' -l debug -d 'Show what the program is doing'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from add edit show queue lists labels refresh search' -l debug -d 'Show what the program is doing'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from search' -l refresh -d 'Update the copy first'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from search' -l max-age -x -d 'Update the copy first if older than this'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from search' -l color -x -a 'auto always never' -d 'When to use colour'

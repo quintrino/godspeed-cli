@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.14.0: 2026-10-16
+
+### Added
+
+- **`godspeed-cli show <id | words>`** prints everything the local copy knows about one task: id, status, list, labels, due date (marked overdue or today), snooze, start date, duration, created and updated times, and notes. `--json` prints the full record. It says if changes to the task are waiting to be sent.
+- **`godspeed-cli queue`** shows what is waiting in the retry queue, numbered: tasks `add` couldn't send, and changes `edit` couldn't send. `queue retry` sends it all now, `queue drop N...` and `queue drop --all` throw items away (after asking, unless `--yes`), and `--json` and `--count` are there for scripts.
+- **`edit --interactive`** (`-i`) chooses the task from a list of your incomplete tasks: type a number to choose, or words to narrow the list. Then the menu appears, or the options you gave are applied.
+- **`--count`** on `search`, `lists`, `labels` and `queue` prints just how many there are. A search that finds nothing prints `0` and exits with status 0.
+- Tab completion and the help pages cover all of this.
+
 ## 0.13.0: 2026-10-16
 
 ### Added

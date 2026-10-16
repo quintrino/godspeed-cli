@@ -55,6 +55,8 @@ struct Args {
     changes: Changes,
     yes: bool,
     json: bool,
+    /// Choose the task from a list.
+    interactive: bool,
 }
 
 /// The value of an option that takes one: the next argument, or the part after `=`.
@@ -77,7 +79,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut options_done = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        if options_done || (!arg.starts_with("--") && arg != "-y") {
+        if options_done || (!arg.starts_with("--") && arg != "-y" && arg != "-i") {
             words.push(arg);
             continue;
         }
@@ -106,6 +108,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 "--delete" => changes.delete = true,
                 "--yes" | "-y" => parsed.yes = true,
                 "--json" => parsed.json = true,
+                "--interactive" | "-i" => parsed.interactive = true,
                 other => return Err(format!("unknown option '{other}' (see `godspeed-cli edit --help`)")),
             }
         }
@@ -127,11 +130,11 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
 }
 
 /// Whether `text` can be a task id, which goes into the URL: letters, digits, `-` and `_`.
-fn looks_like_id(text: &str) -> bool {
+pub(crate) fn looks_like_id(text: &str) -> bool {
     !text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn str_field<'a>(task: &'a Value, key: &str) -> &'a str {
+pub(crate) fn str_field<'a>(task: &'a Value, key: &str) -> &'a str {
     task.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
@@ -217,19 +220,20 @@ impl PendingEdit {
 
 /// The tasks and lists of the local copy, if there is one.
 #[derive(Default)]
-struct Copy {
-    tasks: Vec<StoredTask>,
-    lists: Vec<Value>,
+pub(crate) struct Copy {
+    pub(crate) tasks: Vec<StoredTask>,
+    pub(crate) lists: Vec<Value>,
+    pub(crate) labels: Vec<Value>,
 }
 
-fn load_copy() -> Copy {
+pub(crate) fn load_copy() -> Copy {
     let path = paths::store_path();
     if !path.exists() {
         debug!("there is no local copy to look in");
         return Copy::default();
     }
     debug!("reading the local copy {}", path.display());
-    match Store::open(&path).and_then(|store| Ok(Copy { tasks: store.tasks(true)?, lists: store.lists()? })) {
+    match Store::open(&path).and_then(|store| Ok(Copy { tasks: store.tasks(true)?, lists: store.lists()?, labels: store.labels()? })) {
         Ok(copy) => copy,
         Err(e) => {
             debug!("the local copy could not be read: {e}");
@@ -240,8 +244,8 @@ fn load_copy() -> Copy {
 
 /// The task as it is known: from the local copy if it is there.
 #[derive(Debug, Clone)]
-struct Target {
-    id: String,
+pub(crate) struct Target {
+    pub(crate) id: String,
     title: Option<String>,
     complete: Option<bool>,
     list: Option<String>,
@@ -253,7 +257,7 @@ impl Target {
         Target { id: id.to_string(), title: None, complete: None, list: None, due: None }
     }
 
-    fn from_copy(task: &StoredTask, lists: &[Value]) -> Target {
+    pub(crate) fn from_copy(task: &StoredTask, lists: &[Value]) -> Target {
         let list_id = str_field(&task.json, "list_id");
         let due = ["due_at", "timeless_due_at"].iter().map(|key| str_field(&task.json, key)).find(|due| !due.is_empty());
         Target {
@@ -270,7 +274,7 @@ impl Target {
         self.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or(&self.id)
     }
 
-    fn summary(&self) -> String {
+    pub(crate) fn summary(&self) -> String {
         let mut parts = vec![self.name().to_string()];
         if let Some(list) = &self.list {
             parts.push(format!("[{list}]"));
@@ -288,7 +292,7 @@ impl Target {
 
 /// The tasks in the copy that `text` names: the one with that id, or else those whose titles
 /// contain every word of it, ignoring case.
-fn candidates(tasks: &[StoredTask], text: &str) -> Vec<usize> {
+pub(crate) fn candidates(tasks: &[StoredTask], text: &str) -> Vec<usize> {
     if let Some(index) = tasks.iter().position(|task| str_field(&task.json, "id") == text) {
         return vec![index];
     }
@@ -308,7 +312,7 @@ fn candidates(tasks: &[StoredTask], text: &str) -> Vec<usize> {
 }
 
 /// Reads one line, or None at the end of the input.
-fn read_line(input: &mut dyn BufRead) -> Option<String> {
+pub(crate) fn read_line(input: &mut dyn BufRead) -> Option<String> {
     let mut line = String::new();
     match input.read_line(&mut line) {
         Ok(0) | Err(_) => None,
@@ -357,6 +361,70 @@ fn find_target(
                 let listed: Vec<String> = targets.iter().map(|target| format!("  {}", target.summary())).collect();
                 Err(format!("{} tasks match '{text}'; give the id of one:\n{}", targets.len(), listed.join("\n")))
             }
+        }
+    }
+}
+
+/// How many tasks the picker lists at a time.
+const PICKER_PAGE: usize = 20;
+
+/// Lets the person choose one of the incomplete tasks in the copy: they are listed (the first
+/// `PICKER_PAGE`, newest change first), and a number chooses one. Typing words narrows the list
+/// to the titles that contain them, on top of any words already given; `q` quits.
+fn choose_task(
+    copy: &Copy,
+    words: &str,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+) -> Result<Target, String> {
+    let open: Vec<&StoredTask> = copy.tasks.iter().filter(|task| !task.complete).collect();
+    if open.is_empty() {
+        return Err("there are no incomplete tasks in the local copy. Run `godspeed-cli refresh` first.".to_string());
+    }
+    let mut filter = words.trim().to_string();
+    // The last filter that found something, to go back to when a new one finds nothing.
+    let mut last_good = String::new();
+    loop {
+        let terms: Vec<String> = filter.split_whitespace().map(str::to_lowercase).collect();
+        let shown: Vec<&StoredTask> = open
+            .iter()
+            .copied()
+            .filter(|task| {
+                let title = str_field(&task.json, "title").to_lowercase();
+                terms.iter().all(|term| title.contains(term))
+            })
+            .collect();
+        if shown.is_empty() {
+            let _ = writeln!(out, "No task matches '{filter}'.");
+            filter = std::mem::take(&mut last_good);
+            continue;
+        }
+        last_good = filter.clone();
+        let heading = if filter.is_empty() { "Tasks".to_string() } else { format!("Tasks matching '{filter}'") };
+        let _ = writeln!(out, "{heading} ({}):", shown.len());
+        for (number, task) in shown.iter().take(PICKER_PAGE).enumerate() {
+            let _ = writeln!(out, "  {:>2}) {}", number + 1, Target::from_copy(task, &copy.lists).summary());
+        }
+        if shown.len() > PICKER_PAGE {
+            let _ = writeln!(out, "  ... and {} more; type words to narrow the list", shown.len() - PICKER_PAGE);
+        }
+        let _ = write!(out, "Choose a number, type words to narrow the list, or q to quit: ");
+        let _ = out.flush();
+        let Some(answer) = read_line(input) else { return Err("no task chosen".to_string()) };
+        match answer.as_str() {
+            "q" | "quit" => return Err("no task chosen".to_string()),
+            "" => {}
+            _ => match answer.parse::<usize>() {
+                Ok(number) if (1..=shown.len().min(PICKER_PAGE)).contains(&number) => {
+                    return Ok(Target::from_copy(shown[number - 1], &copy.lists));
+                }
+                Ok(number) => {
+                    let _ = writeln!(out, "'{number}' isn't one of the numbers shown.");
+                }
+                Err(_) => {
+                    filter = format!("{filter} {answer}").trim().to_string();
+                }
+            },
         }
     }
 }
@@ -751,8 +819,12 @@ pub fn run_edit(args: &[String]) -> ExitCode {
         Ok(args) => args,
         Err(message) => return fail(&message),
     };
-    let from_stdin = args.target == "-" || (args.target.is_empty() && !args.changes.is_empty() && !io::stdin().is_terminal());
-    if args.target.is_empty() && !from_stdin {
+    if args.interactive && args.target == "-" {
+        return fail("--interactive chooses one task, so it can't be used with ids on stdin");
+    }
+    let from_stdin = !args.interactive
+        && (args.target == "-" || (args.target.is_empty() && !args.changes.is_empty() && !io::stdin().is_terminal()));
+    if args.target.is_empty() && !from_stdin && !args.interactive {
         return fail("say which task to edit: godspeed-cli edit <id> (`godspeed-cli search --id` shows ids)");
     }
     if from_stdin && args.changes.is_empty() {
@@ -786,7 +858,12 @@ pub fn run_edit(args: &[String]) -> ExitCode {
             .collect()
     } else {
         let mut input = stdin.lock();
-        let target = match find_target(&copy, &args.target, interactive, &mut input, &mut out) {
+        let chosen = if args.interactive {
+            choose_task(&copy, &args.target, &mut input, &mut out)
+        } else {
+            find_target(&copy, &args.target, interactive, &mut input, &mut out)
+        };
+        let target = match chosen {
             Ok(target) => target,
             Err(message) => return fail(&message),
         };

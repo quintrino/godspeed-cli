@@ -21,6 +21,8 @@ struct SearchArgs {
     id: bool,
     /// Print only the ids, one per line.
     ids_only: bool,
+    /// Print only how many tasks were found.
+    count: bool,
     color: ColorMode,
     /// Refresh the copy before searching.
     refresh: bool,
@@ -29,7 +31,7 @@ struct SearchArgs {
     query: Vec<String>,
 }
 
-/// `--json`, `--id`, `--ids-only`, `--refresh`, `--max-age AGE` and `--color WHEN` (or `--max-age=AGE`, `--color=WHEN`)
+/// `--json`, `--id`, `--ids-only`, `--count`, `--refresh`, `--max-age AGE` and `--color WHEN` (or `--max-age=AGE`, `--color=WHEN`)
 /// can go anywhere; `--` ends the
 /// options, so a query can contain them. Everything else is the query. A lone leading `-` is a
 /// negation, not an option.
@@ -69,12 +71,14 @@ fn parse_args(args: &[String]) -> Result<SearchArgs, String> {
             "--json" => parsed.json = true,
             "--id" => parsed.id = true,
             "--ids-only" => parsed.ids_only = true,
+            "--count" => parsed.count = true,
             "--refresh" => parsed.refresh = true,
             _ => parsed.query.push(arg.clone()),
         }
     }
-    if parsed.ids_only && parsed.json {
-        return Err("--ids-only and --json can't be combined".to_string());
+    let chosen = [parsed.json, parsed.ids_only, parsed.count].iter().filter(|on| **on).count();
+    if chosen > 1 {
+        return Err("--json, --ids-only and --count can't be combined".to_string());
     }
     Ok(parsed)
 }
@@ -213,12 +217,14 @@ pub fn run_search(args: &[String]) -> ExitCode {
     let context = Context::new(&loaded.lists, &loaded.labels, now);
     let matched: Vec<&StoredTask> = loaded.tasks.iter().filter(|task| context.matches(&query.expr, task)).collect();
     debug!("search: {} of {} tasks in the copy match", matched.len(), loaded.tasks.len());
-    if matched.is_empty() && !args.json {
+    if matched.is_empty() && !args.json && !args.count {
         eprintln!("No matching tasks.");
     }
 
     let color = !args.json && color::stdout_color(args.color);
-    let output = if args.ids_only {
+    let output = if args.count {
+        present::count(&query, matched, &context).to_string()
+    } else if args.ids_only {
         present::render_ids(&query, matched, &context)
     } else {
         present::render_with(&query, matched, &context, args.json, color, args.id)

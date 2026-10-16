@@ -38,6 +38,8 @@ struct Args {
     json: bool,
     id: bool,
     ids_only: bool,
+    /// Print only how many there are.
+    count: bool,
     color: ColorMode,
     /// The words to match, joined with spaces. Empty shows everything.
     filter: String,
@@ -68,14 +70,16 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--" => options_done = true,
             "--id" => parsed.id = true,
             "--ids-only" => parsed.ids_only = true,
+            "--count" => parsed.count = true,
             "--json" => parsed.json = true,
             other if other.starts_with("--") => return Err(format!("unknown option '{other}' (see --help)")),
             _ => words.push(arg),
         }
     }
     parsed.filter = words.join(" ");
-    if parsed.ids_only && parsed.json {
-        return Err("--ids-only and --json can't be combined".to_string());
+    let chosen = [parsed.json, parsed.ids_only, parsed.count].iter().filter(|on| **on).count();
+    if chosen > 1 {
+        return Err("--json, --ids-only and --count can't be combined".to_string());
     }
     Ok(parsed)
 }
@@ -131,6 +135,9 @@ fn table(rows: &[Vec<String>], color: bool) -> String {
 }
 
 fn render(kind: Kind, items: &[&Value], args: &Args, color: bool) -> String {
+    if args.count {
+        return items.len().to_string();
+    }
     if args.json {
         return serde_json::to_string_pretty(&items).expect("the items serialise");
     }
@@ -222,7 +229,7 @@ pub fn run(kind: Kind, args: &[String]) -> ExitCode {
     let total = items.len();
     let shown: Vec<&Value> = items.iter().filter(|item| item_matches(item, &args.filter)).collect();
     debug!("{} of {total} {} match {:?}", shown.len(), kind.noun(), args.filter);
-    if shown.is_empty() && !args.json {
+    if shown.is_empty() && !args.json && !args.count {
         if args.filter.is_empty() {
             eprintln!("No {}.", kind.noun());
         } else {

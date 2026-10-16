@@ -211,11 +211,13 @@ Create tasks in Godspeed, and search them, from the command line.
 ## USAGE
 > godspeed-cli add [--json] [--] <TASK>...
 > echo "<TASK>" | godspeed-cli add
-> godspeed-cli edit [OPTIONS] <ID | WORDS>...
-> godspeed-cli lists [--id | --ids-only] [--json] [STRING]...
-> godspeed-cli labels [--id | --ids-only] [--json] [STRING]...
+> godspeed-cli edit [--interactive] [OPTIONS] <ID | WORDS>...
+> godspeed-cli show [--json] <ID | WORDS>...
+> godspeed-cli queue [--json | --count] | retry | drop <NUMBER>... | drop --all
+> godspeed-cli lists [--id | --ids-only | --count] [--json] [STRING]...
+> godspeed-cli labels [--id | --ids-only | --count] [--json] [STRING]...
 > godspeed-cli refresh [--full] [--include-completed] [--json]
-> godspeed-cli search [--json] [--id] [--ids-only] [--refresh] [--max-age AGE] [--color WHEN] [QUERY]...
+> godspeed-cli search [--json] [--id] [--ids-only] [--count] [--refresh] [--max-age AGE] [--color WHEN] [QUERY]...
 > godspeed-cli completions <bash|fish|zsh>
 > godspeed-cli <command> --help
 > godspeed-cli --help | --version
@@ -223,6 +225,8 @@ Create tasks in Godspeed, and search them, from the command line.
 ## COMMANDS
 - add => Create a task. The task is the rest of the line, or stdin if there is none. `godspeed-cli add --help` explains the task syntax and how list and label names are matched.
 - edit => Change a task: edit it, complete it, snooze it, delete it or move it to another list, by its id. `godspeed-cli edit --help` has the details.
+- show => Show everything the local copy knows about one task, by id or title words. `godspeed-cli show --help` has the details.
+- queue => Show what is waiting to be sent after a failure (tasks from `add`, changes from `edit`), send it now with `queue retry`, or throw it away with `queue drop`. `godspeed-cli queue --help` has the details.
 - lists => Show your lists, or only those matching a string. --id shows their ids.
 - labels => Show your labels, or only those matching a string. --id shows their ids.
 - refresh => Keep a local copy of your tasks, lists and labels, for searching. The first refresh downloads everything; after that only what changed is fetched, which is quick. --full rebuilds the copy from scratch. `godspeed-cli refresh --help` has the details.
@@ -466,6 +470,7 @@ Target lists: group:label:p0|p1|p2 makes those groups, in that order, and puts a
 ## OPTIONS
 - --id => Add a column with each task's id, which `godspeed-cli edit` takes. JSON always has the id.
 - --ids-only => Print just the ids, one per line, in the order of the table, to pipe into `godspeed-cli edit`. Can't be combined with --json.
+- --count => Print only how many tasks were found (after any limit:), such as 4, and nothing else. A search that finds nothing prints 0 and still exits with status 0. Can't be combined with --json or --ids-only.
 - --debug => Print what the program is doing to stderr.
 - --refresh => Update the local copy first (an incremental refresh when possible). Needs a token. If the refresh fails, the existing copy is searched, with a note on stderr.
 - --max-age AGE => Update the copy first if it is older than AGE, such as 30m, 6h, "2 days" or 0 (always). "never" turns off a max_age from the settings file.
@@ -486,7 +491,7 @@ pub const LISTS_HELP: &str = r#"
 Show your lists, or only those whose name contains a string.
 
 ## USAGE
-> godspeed-cli lists [--id | --ids-only] [--json] [--color WHEN] [--debug] [STRING]...
+> godspeed-cli lists [--id | --ids-only | --count] [--json] [--color WHEN] [--debug] [STRING]...
 
 ## EXAMPLES
 > godspeed-cli lists
@@ -497,6 +502,7 @@ Show your lists, or only those whose name contains a string.
 - STRING => Only show lists whose name contains it, ignoring case (and spaces, slashes and dashes, so `workproj` finds "Work Projects"). Several words are joined with spaces.
 - --id => Add a column with each list's id.
 - --ids-only => Print just the ids, one per line.
+- --count => Print only how many there are.
 - --json => Print the lists as JSON, as the API describes them.
 - --color WHEN => auto (the default), always or never.
 - --debug => Print what the program is doing to stderr, to help find out why something doesn't work. The token is never printed.
@@ -510,7 +516,7 @@ pub const LABELS_HELP: &str = r#"
 Show your labels, or only those whose name contains a string.
 
 ## USAGE
-> godspeed-cli labels [--id | --ids-only] [--json] [--color WHEN] [--debug] [STRING]...
+> godspeed-cli labels [--id | --ids-only | --count] [--json] [--color WHEN] [--debug] [STRING]...
 
 ## EXAMPLES
 > godspeed-cli labels
@@ -521,6 +527,7 @@ Show your labels, or only those whose name contains a string.
 - STRING => Only show labels whose name, or label group, contains it, ignoring case (and spaces, slashes and dashes). Several words are joined with spaces.
 - --id => Add a column with each label's id.
 - --ids-only => Print just the ids, one per line.
+- --count => Print only how many there are.
 - --json => Print the labels as JSON, as the API describes them.
 - --color WHEN => auto (the default), always or never.
 - --debug => Print what the program is doing to stderr, to help find out why something doesn't work. The token is never printed.
@@ -535,6 +542,7 @@ Change a task: edit it, complete it, snooze it, set its due date, duration or la
 
 ## USAGE
 > godspeed-cli edit [OPTIONS] <ID | WORDS>...
+> godspeed-cli edit --interactive [WORDS]...
 > godspeed-cli edit <ID>
 > godspeed-cli search 'due:today' --ids-only | godspeed-cli edit [OPTIONS]
 
@@ -544,6 +552,7 @@ With options and no task, the ids are read from stdin, one on each line, and eve
 
 ## EXAMPLES
 > godspeed-cli edit 5a1b2c3d
+> godspeed-cli edit --interactive milk
 > godspeed-cli edit 5a1b2c3d --complete
 > godspeed-cli edit "buy milk" --snooze tomorrow
 > godspeed-cli edit 5a1b2c3d --title "Buy oat milk" --move home
@@ -553,6 +562,7 @@ With options and no task, the ids are read from stdin, one on each line, and eve
 > godspeed-cli search 'due<today' --ids-only | godspeed-cli edit --snooze tomorrow
 
 ## OPTIONS
+- -i, --interactive => Choose the task from a list instead of giving its id. The incomplete tasks in the local copy are listed (20 at a time, most recently changed first); type a number to choose one, or type words to narrow the list to the titles containing them, or q to quit. WORDS given on the command line narrow it from the start. Then the menu appears, or the options are applied to the task you chose.
 - --title TEXT => Change the title.
 - --notes TEXT => Change the notes. An empty string clears them.
 - --complete => Mark the task complete.
@@ -579,6 +589,67 @@ A change that can't be sent because Godspeed is unreachable or failing is saved,
 - 0 => Done (or nothing to do, or you chose not to delete).
 - 1 => Godspeed couldn't be reached (the change is saved to retry) or refused the change. With several tasks, if any of them failed.
 - 2 => The input can't be used: no token, an unknown option, no such task, list or label, an unreadable date or duration.
+"#;
+
+pub const SHOW_HELP: &str = r#"
+Show everything the local copy knows about one task.
+
+## USAGE
+> godspeed-cli show [--json] <ID | WORDS>...
+
+## EXAMPLES
+> godspeed-cli show 5a1b2c3d
+> godspeed-cli show "buy milk"
+> godspeed-cli show 5a1b2c3d --json
+
+## WHAT IT SHOWS
+The title, then the task's id, status (incomplete or complete), list, labels, due date (marked overdue or today), snooze, start date, duration, when it was created and last changed, and its notes. If changes to the task are waiting in the retry queue, it says how many. Fields the task doesn't have are left out. Dates with no time are shown as they are; times are in your time zone.
+
+## OPTIONS
+- ID | WORDS => The task's id (`godspeed-cli search --id` shows them), or words that its title contains, ignoring case. If several tasks match, they are listed with their ids and you pick one.
+- --json => Print the full record, as `search --json` does, with list_names and label_names added.
+- --debug => Print what the program is doing to stderr.
+- -- => End the options.
+- -h, --help => Print this help.
+
+Works offline, from the copy made by `godspeed-cli refresh`, and sends nothing.
+
+## EXIT STATUS
+- 0 => The task was shown.
+- 2 => No local copy yet, no such task, several matching tasks, or no task named.
+"#;
+
+pub const QUEUE_HELP: &str = r#"
+Show what is waiting to be sent, send it now, or throw it away.
+
+## USAGE
+> godspeed-cli queue [--json | --count]
+> godspeed-cli queue retry
+> godspeed-cli queue drop [--yes] <NUMBER>...
+> godspeed-cli queue drop [--yes] --all
+
+## WHAT IS IN THE QUEUE
+A task that `add` couldn't send, and a change that `edit` couldn't send because Godspeed was unreachable or failing, are saved and retried. Every `add` and `edit` sends what is waiting first, in the order it was saved. This command lets you look at it, and deal with it, yourself.
+
+## COMMANDS
+- queue => List what is waiting, numbered. `queue list` is the same.
+- queue retry => Try to send everything now (`queue send` is the same), and say how many went. Needs a token. Exit status 1 if anything is still waiting.
+- queue drop NUMBER... => Throw away the items with these numbers, as `queue` shows them, after asking. They are never sent.
+- queue drop --all => Throw everything away, after asking.
+
+## OPTIONS
+- --json => List as JSON: for each item its number, kind (add or edit) and its text, or its task id, title and changes.
+- --count => Print only how many items are waiting.
+- -y, --yes => Don't ask before dropping.
+- --debug => Print what the program is doing to stderr.
+- -h, --help => Print this help.
+
+A dropped change was already shown in the local copy when it was queued, so the copy keeps showing it until that task changes in Godspeed; `godspeed-cli refresh --full` makes the copy match Godspeed again.
+
+## EXIT STATUS
+- 0 => Done, or nothing was waiting.
+- 1 => `retry` left something waiting.
+- 2 => The input can't be used: an unknown command, a number that isn't in the queue, or no token for `retry`.
 "#;
 
 pub const COMPLETIONS_HELP: &str = r#"
@@ -760,8 +831,8 @@ mod tests {
         assert_eq!(out, "intro text\n\nS:\n    body text\n");
     }
 
-    fn pages() -> [(&'static str, &'static str); 8] {
-        [("main", HELP), ("add", ADD_HELP), ("refresh", REFRESH_HELP), ("search", SEARCH_HELP), ("completions", COMPLETIONS_HELP), ("lists", LISTS_HELP), ("labels", LABELS_HELP), ("edit", EDIT_HELP)]
+    fn pages() -> [(&'static str, &'static str); 10] {
+        [("main", HELP), ("add", ADD_HELP), ("refresh", REFRESH_HELP), ("search", SEARCH_HELP), ("completions", COMPLETIONS_HELP), ("lists", LISTS_HELP), ("labels", LABELS_HELP), ("edit", EDIT_HELP), ("show", SHOW_HELP), ("queue", QUEUE_HELP)]
     }
 
     #[test]

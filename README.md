@@ -66,6 +66,8 @@ echo "Buy groceries and cook dinner" | godspeed-cli add
 | --- | --- |
 | `add` | Create a task. `add --json` also prints the API's response. See [add --json](#add---json). |
 | `edit` | Edit, complete, snooze, set the due date, duration or labels of, delete or move a task, by id, or many ids piped in. See [Edit](#edit). |
+| `show` | Show everything the local copy knows about one task. See [Show](#show). |
+| `queue` | Show, retry or drop what is waiting to be sent. See [Queue](#queue). |
 | `lists`, `labels` | Show your lists or labels, or those matching a string. See [Lists and labels](#lists-and-labels). |
 | `refresh` | Keep a local copy of your tasks, lists and labels. See [Refresh](#refresh). |
 | `search` | Search the local copy made by `refresh`, offline. See [Search](#search). |
@@ -488,6 +490,7 @@ godspeed-cli search --ids-only 'due:today'
 ```bash
 godspeed-cli edit 5a1b2c3d             # a menu asks what to do
 godspeed-cli edit "buy milk"           # the same, found by title
+godspeed-cli edit --interactive        # choose the task from a list
 godspeed-cli edit 5a1b2c3d --complete
 godspeed-cli edit 5a1b2c3d --snooze tomorrow
 godspeed-cli edit 5a1b2c3d --title "Buy oat milk" --move home
@@ -495,6 +498,8 @@ godspeed-cli edit 5a1b2c3d --due "friday 5pm" --duration 45m
 godspeed-cli edit 5a1b2c3d --add-label Urgent --remove-label Low
 godspeed-cli edit 5a1b2c3d --delete --yes
 ```
+
+With `--interactive` (`-i`) you don't need the id: the incomplete tasks in the local copy are listed (20 at a time, most recently changed first), and you type a number to choose one, or words to narrow the list to the titles containing them, or `q` to quit. Words on the command line narrow it from the start (`edit -i milk`), and options are applied to the task you choose (`edit -i --complete`); with none, the menu below appears.
 
 With just a task, a menu is shown on stderr:
 
@@ -524,6 +529,7 @@ With options, they're done at once, which suits scripts:
 | `--snooze WHEN` | Snooze until `WHEN`, written as for `--due`. A day with no time snoozes for the whole day (`timeless_snoozed_until`), otherwise it's a moment (`snoozed_until`). A time in the past is refused. |
 | `--move LIST` | Move to a list, matched as `@list` is in `add`. |
 | `--delete` | Delete the task, after asking `[y/N]`. `--yes` (`-y`) skips the question. It can't be undone, and can't be combined with other options. |
+| `-i`, `--interactive` | Choose the task from a list (above). |
 | `--json` | Print what happened to each task as JSON: `id`, `title`, `action`, `status` (`done`, `queued` or `failed`) and `error`. |
 
 These use `PATCH /tasks/:id` and `DELETE /tasks/:id`, sending only the fields that change. The local copy is updated as well, so `search` sees the change at once; the next `refresh` brings in Godspeed's own version. An id that isn't in the local copy is still tried.
@@ -545,6 +551,60 @@ godspeed-cli search 'list:Someday' --ids-only | godspeed-cli edit --delete --yes
 A change that can't be sent because Godspeed is unreachable or failing (a connection error, or a status of 5xx, 429 or 408) is saved in the [retry queue](#offline-cache) and the local copy is updated anyway. The next `add` or `edit` sends what is waiting first, in the order it was saved, so an older change can't overwrite a newer one; if a change to a task fails again, later changes to that task wait too. A change Godspeed *refuses* (such as a 404 for a task that no longer exists) is reported and not saved, and one that is refused after being saved is dropped with a message. Lists and labels are looked up in the local copy (and the names `add` has cached) first, and Godspeed is asked only if they aren't there.
 
 Exit status: `0` done, `1` Godspeed couldn't be reached (and the change is saved) or refused it, `2` the input can't be used (no token, no such task, list or label, an unreadable date or duration).
+
+## Show
+
+`godspeed-cli show <id | words>` prints everything the local copy knows about one task: its id, status, list, labels, due date (marked `overdue` or `today`), snooze, start date, duration, when it was created and last changed, and its notes. Fields the task doesn't have are left out.
+
+```
+$ godspeed-cli show "pay rent"
+Pay rent
+  id        5a1b2c3d
+  status    incomplete
+  list      Home
+  labels    Urgent
+  due       2026-10-31
+  duration  30m
+
+Notes:
+  ring the landlord
+```
+
+The task is its id, or words from its title (ignoring case); if several match they are listed with their ids. `--json` prints the full record, as `search --json` does. If changes to the task are waiting in the [queue](#queue), a `waiting` line says so. `show` reads the local copy and sends nothing.
+
+## Queue
+
+A task that `add` couldn't send, and a change that `edit` couldn't send, wait in the [retry queue](#offline-cache) until the next `add` or `edit`. `godspeed-cli queue` lets you look at it and deal with it yourself:
+
+```bash
+godspeed-cli queue                # what is waiting, numbered
+godspeed-cli queue --count        # just how many
+godspeed-cli queue --json         # for scripts
+godspeed-cli queue retry          # try to send it all now
+godspeed-cli queue drop 2 3       # throw items 2 and 3 away
+godspeed-cli queue drop --all     # throw everything away
+```
+
+```
+#   KIND  WAITING
+1   edit  Buy milk (5a1b2c3d): is_complete=true
+2   add   Call mom @Home
+3   edit  Pay rent (7e8f9a0b): delete
+```
+
+`queue retry` needs a token, says how many went (`2 of 3 sent or dropped; 1 still waiting.`) and exits `1` if anything is still waiting. `queue drop` asks `[y/N]` first unless you pass `--yes`; a dropped item is never sent. A dropped *change* was already shown in the local copy when it was queued, so the copy keeps showing it until that task changes in Godspeed; `godspeed-cli refresh --full` makes it match Godspeed again.
+
+## Counting
+
+`--count` prints only a number, for scripts and prompts. It works on `search` (the tasks found, after any `limit:`; a task in several groups counts once), `lists`, `labels` and `queue`:
+
+```bash
+godspeed-cli search 'due<today' --count    # 4
+godspeed-cli lists --count                 # 7
+godspeed-cli queue --count                 # 0
+```
+
+Nothing found prints `0` and still exits with status `0`, unlike `grep -c`. It can't be combined with `--json` or `--ids-only`.
 
 ## Debugging
 
@@ -600,7 +660,7 @@ This ensures you never lose tasks or changes due to connectivity issues.
 
 Only tasks that failed because of the connection or the API are queued. A task that can never be sent, such as one with several lists or no title, is rejected immediately and is not queued. If an earlier version left one of those in the queue, it is dropped on the next run and its text is printed so you can recreate it.
 
-Cache location: `$XDG_DATA_HOME/godspeed-cli/cache` (usually `~/.local/share/godspeed-cli/cache`). A waiting task is its text; a waiting change from `edit` is one line of JSON starting `{"queued_edit":`, with the names already turned into ids and the dates into absolute ones.
+`godspeed-cli queue` shows, retries and drops what is waiting. Cache location: `$XDG_DATA_HOME/godspeed-cli/cache` (usually `~/.local/share/godspeed-cli/cache`). A waiting task is its text; a waiting change from `edit` is one line of JSON starting `{"queued_edit":`, with the names already turned into ids and the dates into absolute ones.
 
 ## List Caching
 

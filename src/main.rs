@@ -17,9 +17,11 @@ mod paths;
 mod pending;
 mod present;
 mod queue;
+mod queue_cmd;
 mod query;
 mod refresh;
 mod search;
+mod show;
 mod store;
 mod task;
 mod token;
@@ -42,12 +44,16 @@ enum Invocation {
     Lists(Vec<String>),
     Labels(Vec<String>),
     Edit(Vec<String>),
+    Show(Vec<String>),
+    Queue(Vec<String>),
     AddHelp,
     RefreshHelp,
     SearchHelp,
     ListsHelp,
     LabelsHelp,
     EditHelp,
+    ShowHelp,
+    QueueHelp,
     Completions(Vec<String>),
     CompletionsHelp,
     /// The hidden command the completion scripts call for names: `__complete lists|labels`.
@@ -101,6 +107,14 @@ fn parse_invocation(args: &[String]) -> Invocation {
             Some("-h" | "--help") => Invocation::EditHelp,
             _ => Invocation::Edit(rest.to_vec()),
         },
+        "show" => match rest.first().map(String::as_str) {
+            Some("-h" | "--help") => Invocation::ShowHelp,
+            _ => Invocation::Show(rest.to_vec()),
+        },
+        "queue" => match rest.first().map(String::as_str) {
+            Some("-h" | "--help") => Invocation::QueueHelp,
+            _ => Invocation::Queue(rest.to_vec()),
+        },
         "completions" => match rest.first().map(String::as_str) {
             Some("-h" | "--help") => Invocation::CompletionsHelp,
             _ => Invocation::Completions(rest.to_vec()),
@@ -112,7 +126,7 @@ fn parse_invocation(args: &[String]) -> Invocation {
 
 /// The message for a command line that isn't understood.
 fn problem_message(problem: &Problem) -> String {
-    const COMMANDS: &str = "Commands: add, edit, lists, labels, refresh, search, completions. Run `godspeed-cli --help` for usage.";
+    const COMMANDS: &str = "Commands: add, edit, show, queue, lists, labels, refresh, search, completions. Run `godspeed-cli --help` for usage.";
     match problem {
         Problem::NoCommand => format!("Error: no command given.\n{COMMANDS}"),
         Problem::Unknown(word) if word.starts_with('-') => {
@@ -181,6 +195,16 @@ fn main() -> ExitCode {
         Invocation::Lists(list_args) => listing::run(listing::Kind::Lists, &list_args),
         Invocation::Labels(label_args) => listing::run(listing::Kind::Labels, &label_args),
         Invocation::Edit(edit_args) => edit::run_edit(&edit_args),
+        Invocation::Show(show_args) => show::run(&show_args),
+        Invocation::Queue(queue_args) => queue_cmd::run(&queue_args),
+        Invocation::ShowHelp => {
+            print_help(help::SHOW_HELP);
+            exit::SUCCESS
+        }
+        Invocation::QueueHelp => {
+            print_help(help::QUEUE_HELP);
+            exit::SUCCESS
+        }
         Invocation::ListsHelp => {
             print_help(help::LISTS_HELP);
             exit::SUCCESS
@@ -380,7 +404,7 @@ mod tests {
     fn the_error_for_an_unknown_command_names_it_and_shows_how_to_create_a_task() {
         let message = problem_message(&Problem::Unknown("string".to_string()));
         assert!(message.contains("'string' isn't a valid godspeed-cli command"), "{message}");
-        assert!(message.contains("add, edit, lists, labels, refresh, search, completions"), "{message}");
+        assert!(message.contains("add, edit, show, queue, lists, labels, refresh, search, completions"), "{message}");
         assert!(message.contains("godspeed-cli add \"string\""), "{message}");
     }
 
@@ -394,6 +418,6 @@ mod tests {
     #[test]
     fn the_error_for_no_command_lists_the_commands() {
         let message = problem_message(&Problem::NoCommand);
-        assert!(message.contains("no command given") && message.contains("add, edit, lists, labels, refresh, search, completions"), "{message}");
+        assert!(message.contains("no command given") && message.contains("add, edit, show, queue, lists, labels, refresh, search, completions"), "{message}");
     }
 }

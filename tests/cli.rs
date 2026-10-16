@@ -1945,7 +1945,7 @@ fn a_bare_word_is_not_a_command_and_creates_nothing() {
     let message = stderr(&output);
     assert!(message.contains("'string' isn't a valid godspeed-cli command"), "{message}");
     assert!(message.contains("godspeed-cli add \"string\""), "{message}");
-    assert!(message.contains("add, edit, lists, labels, refresh, search, completions"), "{message}");
+    assert!(message.contains("add, edit, show, queue, lists, labels, refresh, search, completions"), "{message}");
     assert!(!message.contains("GODSPEED_TOKEN"), "it fails before looking at the token: {message}");
     assert!(api.requests().is_empty(), "nothing is sent, and the queue isn't retried");
     assert_eq!(sandbox.queued_tasks(), vec!["Queued earlier"]);
@@ -1982,7 +1982,7 @@ fn no_arguments_is_an_error_that_lists_the_commands() {
 
     assert_eq!(code(&output), 2);
     assert!(stderr(&output).contains("no command given"), "{}", stderr(&output));
-    assert!(stderr(&output).contains("add, edit, lists, labels, refresh, search, completions"), "{}", stderr(&output));
+    assert!(stderr(&output).contains("add, edit, show, queue, lists, labels, refresh, search, completions"), "{}", stderr(&output));
     assert!(stdout(&output).is_empty());
     assert!(api.requests().is_empty());
 }
@@ -2237,10 +2237,10 @@ fn bash_completes_commands_flags_and_shell_names() {
 
     assert_eq!(
         bash_complete(&sandbox, "godspeed-cli ", &["godspeed-cli", ""]),
-        vec!["add", "edit", "lists", "labels", "refresh", "search", "completions", "--help", "--version"]
+        vec!["add", "edit", "show", "queue", "lists", "labels", "refresh", "search", "completions", "--help", "--version"]
     );
     assert_eq!(bash_complete(&sandbox, "godspeed-cli re", &["godspeed-cli", "re"]), vec!["refresh"]);
-    assert_eq!(bash_complete(&sandbox, "godspeed-cli s", &["godspeed-cli", "s"]), vec!["search"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli s", &["godspeed-cli", "s"]), vec!["show", "search"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli --v", &["godspeed-cli", "--v"]), vec!["--version"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli completions ", &["godspeed-cli", "completions", ""]), vec!["bash", "fish", "zsh"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli completions z", &["godspeed-cli", "completions", "z"]), vec!["zsh"]);
@@ -2249,7 +2249,7 @@ fn bash_completes_commands_flags_and_shell_names() {
         vec!["--full", "--include-completed", "--json"]
     );
     assert_eq!(bash_complete(&sandbox, "godspeed-cli refresh --i", &["godspeed-cli", "refresh", "--i"]), vec!["--include-completed"]);
-    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --", &["godspeed-cli", "search", "--"]), vec!["--json", "--id", "--ids-only", "--refresh", "--max-age", "--color", "--debug"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --", &["godspeed-cli", "search", "--"]), vec!["--json", "--id", "--ids-only", "--count", "--refresh", "--max-age", "--color", "--debug"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli search --m", &["godspeed-cli", "search", "--m"]), vec!["--max-age"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli add --", &["godspeed-cli", "add", "--"]), vec!["--json"]);
     assert!(bash_complete(&sandbox, "godspeed-cli add --r", &["godspeed-cli", "add", "--r"]).is_empty());
@@ -2658,7 +2658,7 @@ fn bash_completes_the_color_flag_and_its_values() {
     let (sandbox, _api) = sample_copy("bash-color");
     let g = "godspeed-cli";
 
-    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --c", &[g, "search", "--c"]), vec!["--color"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --c", &[g, "search", "--c"]), vec!["--count", "--color"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli search --color ", &[g, "search", "--color", ""]), vec!["auto", "always", "never"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli search --color a", &[g, "search", "--color", "a"]), vec!["auto", "always"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli search --color n", &[g, "search", "--color", "n"]), vec!["never"]);
@@ -3851,4 +3851,295 @@ fn a_queued_delete_is_sent_later() {
     let deletes = requests_with(&api, "DELETE");
     assert_eq!(deletes.len(), 2, "one that failed and one that went through");
     assert!(sandbox.queued_tasks().is_empty());
+}
+
+// ---- --count, show, queue and edit --interactive ----
+
+#[test]
+fn search_count_prints_just_the_number_and_zero_is_still_success() {
+    let sandbox = refreshed("search-count", false);
+
+    let all = search(&sandbox, &["--count"]);
+    let some = search(&sandbox, &["--count", "list:Home"]);
+    let limited = search(&sandbox, &["--count", "sort:title limit:2"]);
+    let grouped = search(&sandbox, &["--count", "group:list"]);
+    let none = search(&sandbox, &["--count", "zzzzz"]);
+    let clash = search(&sandbox, &["--count", "--json"]);
+
+    assert_eq!(stdout(&all), "3\n");
+    assert_eq!(stdout(&some), "2\n");
+    assert_eq!(stdout(&limited), "2\n", "after limit:");
+    assert_eq!(stdout(&grouped), "3\n", "tasks, not groups");
+    assert_eq!((stdout(&none).as_str(), code(&none)), ("0\n", 0));
+    assert!(stderr(&none).is_empty(), "no 'No matching tasks.' note: {}", stderr(&none));
+    assert_eq!(code(&clash), 2);
+    assert!(stderr(&clash).contains("can't be combined"), "{}", stderr(&clash));
+}
+
+#[test]
+fn lists_and_labels_count() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("names-count");
+
+    assert_eq!(stdout(&sandbox.run(&api, &["lists", "--count"])), "2\n");
+    assert_eq!(stdout(&sandbox.run(&api, &["labels", "--count", "writ"])), "1\n");
+    assert_eq!(stdout(&sandbox.run(&api, &["labels", "--count", "nothing"])), "0\n");
+    assert_eq!(code(&sandbox.run(&api, &["lists", "--count", "--ids-only"])), 2);
+}
+
+#[test]
+fn show_prints_the_task_in_full_from_the_copy_and_sends_nothing() {
+    let (sandbox, api) = sample_copy("show-task");
+    let before = api.requests().len();
+
+    let by_id = sandbox.run_with(Some(&api.url), None, &["show", "t1"], None);
+    let by_words = sandbox.run_with(Some(&api.url), None, &["show", "pay", "RENT"], None);
+
+    assert_eq!(code(&by_id), 0, "{}", stderr(&by_id));
+    assert_eq!(stdout(&by_id), stdout(&by_words));
+    let text = stdout(&by_id);
+    assert!(text.starts_with("Pay rent\n"), "{text}");
+    for line in [
+        "  id        t1",
+        "  status    incomplete",
+        "  list      Home",
+        "  labels    Urgent",
+        "  due       2026-10-31",
+        "  duration  30m",
+    ] {
+        assert!(text.lines().any(|l| l == line), "missing {line:?} in:\n{text}");
+    }
+    assert!(text.contains("\nNotes:\n  ring the landlord"), "{text}");
+    assert_eq!(api.requests().len(), before, "show never contacts the API");
+}
+
+#[test]
+fn show_json_has_the_names_and_a_queued_change_is_mentioned() {
+    let (sandbox, api) = sample_copy("show-json");
+    api.set_change_status(503);
+    sandbox.run(&api, &["edit", "t3", "--title", "Buy tea"]);
+
+    let json_out = sandbox.run(&api, &["show", "t1", "--json"]);
+    let queued = sandbox.run(&api, &["show", "t3"]);
+
+    let task: Value = serde_json::from_str(&stdout(&json_out)).unwrap();
+    assert_eq!(task["id"], "t1");
+    assert_eq!(task["list_names"], json!(["Home"]));
+    assert_eq!(task["label_names"], json!(["Urgent"]));
+    assert!(stdout(&queued).starts_with("Buy tea\n"), "the copy has the change: {}", stdout(&queued));
+    assert!(stdout(&queued).contains("  waiting   1 change not yet sent (see `godspeed-cli queue`)"), "{}", stdout(&queued));
+}
+
+#[test]
+fn show_problems_are_exit_2() {
+    let (sandbox, api) = sample_copy("show-problems");
+    let nothing = Sandbox::new("show-no-copy");
+
+    let none_named = sandbox.run(&api, &["show"]);
+    let unknown_id = sandbox.run(&api, &["show", "t99"]);
+    let unknown_words = sandbox.run(&api, &["show", "no", "such", "thing"]);
+    let several = sandbox.run(&api, &["show", "y"]);
+    let no_copy = nothing.run(&api, &["show", "t1"]);
+
+    for output in [&none_named, &unknown_id, &unknown_words, &several, &no_copy] {
+        assert_eq!(code(output), 2, "{}", stderr(output));
+        assert!(stdout(output).is_empty());
+    }
+    assert!(stderr(&unknown_id).contains("no task has that id"), "{}", stderr(&unknown_id));
+    assert!(stderr(&several).contains("id t1") && stderr(&several).contains("id t3"), "{}", stderr(&several));
+    assert!(stderr(&no_copy).contains("refresh"), "{}", stderr(&no_copy));
+}
+
+/// Fills the queue with a change and an add, as failures would have.
+fn queue_with_a_change_and_an_add(sandbox: &Sandbox) {
+    sandbox.write_queue(&[
+        r#"{"queued_edit":{"id":"t3","title":"Buy milk","patch":{"is_complete":true},"delete":false}}"#,
+        "Call mom @Home",
+        r#"{"queued_edit":{"id":"t1","title":"Pay rent","patch":null,"delete":true}}"#,
+    ]);
+}
+
+#[test]
+fn queue_lists_what_is_waiting_and_counts_it() {
+    let (sandbox, api) = sample_copy("queue-list");
+    let empty = sandbox.run(&api, &["queue"]);
+    queue_with_a_change_and_an_add(&sandbox);
+
+    let listed = sandbox.run(&api, &["queue"]);
+    let count = sandbox.run(&api, &["queue", "--count"]);
+    let json_out = sandbox.run(&api, &["queue", "--json"]);
+
+    assert!(stdout(&empty).is_empty());
+    assert!(stderr(&empty).contains("Nothing is waiting"), "{}", stderr(&empty));
+    assert_eq!(
+        lines(&listed),
+        vec![
+            "#   KIND  WAITING",
+            "1   edit  Buy milk (t3): is_complete=true",
+            "2   add   Call mom @Home",
+            "3   edit  Pay rent (t1): delete",
+        ]
+    );
+    assert_eq!(stdout(&count), "3\n");
+    let items: Value = serde_json::from_str(&stdout(&json_out)).unwrap();
+    assert_eq!(items[1], json!({"number": 2, "kind": "add", "text": "Call mom @Home"}));
+    assert_eq!(items[2]["delete"], true);
+    assert_eq!(api.requests().iter().filter(|r| r.method != "GET").count(), 0, "listing sends nothing");
+}
+
+#[test]
+fn queue_retry_sends_everything_and_says_what_is_left() {
+    let (sandbox, api) = sample_copy("queue-retry");
+    queue_with_a_change_and_an_add(&sandbox);
+    api.set_change_status(503);
+
+    let failing = sandbox.run(&api, &["queue", "retry"]);
+    assert_eq!(code(&failing), 1);
+    assert!(stdout(&failing).contains("1 of 3 sent or dropped; 2 still waiting."), "{}", stdout(&failing));
+    assert_eq!(sandbox.queued_tasks().len(), 2, "the add went; both changes wait: {}", stderr(&failing));
+
+    api.set_change_status(200);
+    let working = sandbox.run(&api, &["queue", "retry"]);
+
+    assert_eq!(code(&working), 0, "{}", stderr(&working));
+    assert!(stdout(&working).contains("2 of 2 sent or dropped; 0 still waiting."), "{}", stdout(&working));
+    assert!(sandbox.queued_tasks().is_empty());
+    assert_eq!(api.posted_tasks().len(), 1);
+    assert_eq!(requests_with(&api, "DELETE").len(), 2, "one that failed and one that went through");
+
+    let nothing = sandbox.run(&api, &["queue", "retry"]);
+    assert_eq!(code(&nothing), 0);
+    let no_token = sandbox.run_with(Some(&api.url), None, &["queue", "retry"], None);
+    assert_eq!(code(&no_token), 2);
+}
+
+#[test]
+fn queue_drop_removes_the_numbered_items_after_asking() {
+    let (sandbox, api) = sample_copy("queue-drop");
+    queue_with_a_change_and_an_add(&sandbox);
+
+    let declined = sandbox.run_stdin(&api, &["queue", "drop", "2"], "n\n");
+    assert_eq!(code(&declined), 0);
+    assert_eq!(sandbox.queued_tasks().len(), 3);
+    assert!(stderr(&declined).contains("Drop 1 item?"), "{}", stderr(&declined));
+
+    let dropped = sandbox.run_stdin(&api, &["queue", "drop", "2"], "y\n");
+    assert_eq!(code(&dropped), 0, "{}", stderr(&dropped));
+    assert_eq!(stdout(&dropped), "Dropped 1 item.\n");
+    assert_eq!(sandbox.queued_tasks().len(), 2);
+    assert!(!sandbox.queued_tasks().iter().any(|entry| entry == "Call mom @Home"));
+
+    let both = sandbox.run(&api, &["queue", "drop", "1", "2", "--yes"]);
+    assert_eq!(code(&both), 0, "{}", stderr(&both));
+    assert!(stderr(&both).contains("refresh --full"), "a dropped change is noted: {}", stderr(&both));
+    assert!(sandbox.queued_tasks().is_empty());
+    assert!(api.requests().iter().all(|r| r.method == "GET"), "dropping sends nothing");
+}
+
+#[test]
+fn queue_drop_all_and_its_mistakes() {
+    let (sandbox, api) = sample_copy("queue-drop-all");
+    queue_with_a_change_and_an_add(&sandbox);
+
+    let too_far = sandbox.run(&api, &["queue", "drop", "7", "--yes"]);
+    let nothing_named = sandbox.run(&api, &["queue", "drop"]);
+    let both = sandbox.run(&api, &["queue", "drop", "--all", "1"]);
+    let odd = sandbox.run(&api, &["queue", "drop", "two"]);
+    let unknown = sandbox.run(&api, &["queue", "frobnicate"]);
+    for output in [&too_far, &nothing_named, &both, &odd, &unknown] {
+        assert_eq!(code(output), 2, "{}", stderr(output));
+    }
+    assert!(stderr(&too_far).contains("there is no item 7"), "{}", stderr(&too_far));
+    assert_eq!(sandbox.queued_tasks().len(), 3);
+
+    let all = sandbox.run(&api, &["queue", "drop", "--all", "--yes"]);
+    assert_eq!(stdout(&all), "Dropped 3 items.\n");
+    assert!(sandbox.queued_tasks().is_empty());
+}
+
+#[test]
+fn dropping_one_of_two_identical_items_leaves_the_other() {
+    let (sandbox, api) = sample_copy("queue-drop-twin");
+    sandbox.write_queue(&["Same task", "Same task"]);
+
+    let output = sandbox.run(&api, &["queue", "drop", "1", "--yes"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(sandbox.queued_tasks(), vec!["Same task"]);
+}
+
+#[test]
+fn edit_interactive_lists_the_open_tasks_and_a_number_chooses_one() {
+    let (sandbox, api) = sample_copy("edit-interactive");
+
+    let output = sandbox.run_stdin(&api, &["edit", "--interactive", "--complete"], "2\n");
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let menu = stderr(&output);
+    assert!(menu.contains("Tasks (3):"), "{menu}");
+    assert!(menu.contains("1) Pay rent") && menu.contains("2) Write blog post") && menu.contains("3) Buy milk"), "{menu}");
+    let patches = requests_with(&api, "PATCH");
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].path, "/tasks/t2", "task number 2 in the list");
+}
+
+#[test]
+fn edit_interactive_narrows_by_words_then_shows_the_menu() {
+    let (sandbox, api) = sample_copy("edit-interactive-narrow");
+
+    // Narrow to "mi" (Buy milk), choose it, then pick menu item 3 (complete).
+    let output = sandbox.run_stdin(&api, &["edit", "-i"], "mi\n1\n3\n");
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(stderr(&output).contains("Tasks matching 'mi' (1):"), "{}", stderr(&output));
+    let patches = requests_with(&api, "PATCH");
+    assert_eq!(patches[0].path, "/tasks/t3");
+    assert_eq!(serde_json::from_str::<Value>(&patches[0].body).unwrap(), json!({"is_complete": true}));
+}
+
+#[test]
+fn edit_interactive_starts_narrowed_by_the_words_given_and_handles_nonsense() {
+    let (sandbox, api) = sample_copy("edit-interactive-words");
+
+    let output = sandbox.run_stdin(&api, &["edit", "--interactive", "blog", "--complete"], "9\nzzz\n1\n");
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("Tasks matching 'blog' (1):"), "{text}");
+    assert!(text.contains("'9' isn't one of the numbers shown."), "{text}");
+    assert!(text.contains("No task matches 'blog zzz'."), "{text}");
+    assert_eq!(text.matches("Tasks matching 'blog' (1):").count(), 3, "it goes back to 'blog' each time: {text}");
+    assert_eq!(requests_with(&api, "PATCH")[0].path, "/tasks/t2");
+}
+
+#[test]
+fn edit_interactive_can_be_quit_and_needs_a_copy_and_not_stdin_ids() {
+    let (sandbox, api) = sample_copy("edit-interactive-quit");
+    let nothing = Sandbox::new("edit-interactive-no-copy");
+
+    let quit = sandbox.run_stdin(&api, &["edit", "-i", "--complete"], "q\n");
+    let eof = sandbox.run_stdin(&api, &["edit", "-i"], "");
+    let no_copy = nothing.run_stdin(&api, &["edit", "-i"], "1\n");
+    let dash = sandbox.run_stdin(&api, &["edit", "-i", "-", "--complete"], "t1\n");
+
+    assert_eq!(code(&quit), 2);
+    assert!(stderr(&quit).contains("no task chosen"), "{}", stderr(&quit));
+    assert_eq!(code(&eof), 2);
+    assert_eq!(code(&no_copy), 2);
+    assert!(stderr(&no_copy).contains("refresh"), "{}", stderr(&no_copy));
+    assert_eq!(code(&dash), 2);
+    assert!(requests_with(&api, "PATCH").is_empty());
+}
+
+#[test]
+fn the_new_commands_have_their_own_help() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("show-queue-help");
+
+    for (command, needle) in [("show", "Show everything the local copy knows"), ("queue", "Show what is waiting to be sent")] {
+        let output = sandbox.run_with(Some(&api.url), None, &[command, "--help"], None);
+        assert_eq!(code(&output), 0);
+        assert!(stdout(&output).contains(needle), "{}", stdout(&output));
+    }
+    assert!(api.requests().is_empty());
 }

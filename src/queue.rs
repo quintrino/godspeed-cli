@@ -42,3 +42,12 @@ pub fn remove(task: &str) -> io::Result<()> {
 
     fs::write(&path, new_content)
 }
+
+/// Removes the entries at these positions (0-based, in the order `tasks` gives them). Entries
+/// that are the same text are told apart by position, so dropping one leaves its twin.
+pub fn remove_indexes(indexes: &[usize]) -> io::Result<()> {
+    let remaining: Vec<String> =
+        tasks().into_iter().enumerate().filter(|(index, _)| !indexes.contains(index)).map(|(_, task)| task).collect();
+    let content: String = remaining.iter().map(|task| format!("{task}\n{DIVIDER}")).collect();
+    fs::write(queue_path(), content)
+}
