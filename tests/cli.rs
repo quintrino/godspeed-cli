@@ -2499,6 +2499,7 @@ fn the_negations_after_the_or_only_apply_to_the_right_hand_side() {
 
 const RED: &str = "\x1b[31m";
 const YELLOW: &str = "\x1b[33m";
+const MAGENTA: &str = "\x1b[35m";
 const HEADER: &str = "\x1b[1;36m";
 const RESET: &str = "\x1b[0m";
 
@@ -3162,4 +3163,100 @@ fn notes_start_at_the_first_n_colon_that_has_a_space_before_it() {
     let attached = posted_with_names(&[], &[], "Buy milkn: ask");
     assert_eq!(attached["title"], "Buy milkn: ask", "no space before n: so it is not notes");
     assert!(attached.get("notes").is_none());
+}
+
+// ---- a colour for tasks due today ----
+
+/// Runs `body` with today's date, trying again if midnight passes while it runs, so that a test
+/// that depends on which day it is can't be caught out by the date changing underneath it.
+fn on_one_day<T>(mut body: impl FnMut(NaiveDate) -> T) -> (NaiveDate, T) {
+    for _ in 0..3 {
+        let day = today();
+        let result = body(day);
+        if today() == day {
+            return (day, result);
+        }
+    }
+    let day = today();
+    (day, body(day))
+}
+
+/// A copy with one task overdue (yesterday), one due today, one due tomorrow and one with no date.
+fn due_dates_copy(name: &str, day: NaiveDate) -> Sandbox {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new(name);
+    let date = |offset: i64| (day + Duration::days(offset)).format("%Y-%m-%d").to_string();
+    api.queue_page_with(
+        vec![
+            json!({"id": "late", "title": "Overdue task", "timeless_due_at": date(-1), "updated_at": "2026-03-04T00:00:00Z"}),
+            json!({"id": "now", "title": "Today task", "timeless_due_at": date(0), "updated_at": "2026-03-03T00:00:00Z"}),
+            json!({"id": "soon", "title": "Tomorrow task", "timeless_due_at": date(1), "updated_at": "2026-03-02T00:00:00Z"}),
+            json!({"id": "none", "title": "Undated task", "updated_at": "2026-03-01T00:00:00Z"}),
+        ],
+        json!([]),
+        json!([]),
+    );
+    let output = sandbox.run(&api, &["refresh"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    sandbox
+}
+
+#[test]
+fn a_task_due_today_has_a_magenta_date_overdue_is_red_and_the_rest_are_plain() {
+    let (day, text) = on_one_day(|day| {
+        let sandbox = due_dates_copy("today-colours", day);
+        stdout(&search(&sandbox, &["--color", "always"]))
+    });
+
+    let date = |offset: i64| (day + Duration::days(offset)).format("%Y-%m-%d").to_string();
+    let row = |title: &str| text.lines().find(|l| l.starts_with(title)).unwrap_or_else(|| panic!("{title} in {text:?}")).to_string();
+    assert!(row("Overdue task").contains(&format!("{RED}{}{RESET}", date(-1))), "{:?}", row("Overdue task"));
+    assert!(row("Today task").contains(&format!("{MAGENTA}{}{RESET}", date(0))), "{:?}", row("Today task"));
+    assert!(!row("Today task").contains(RED));
+    assert!(!row("Tomorrow task").contains('\x1b'), "{:?}", row("Tomorrow task"));
+    assert!(!row("Undated task").contains('\x1b'), "{:?}", row("Undated task"));
+    assert_eq!(text.matches(MAGENTA).count(), 1);
+    assert_eq!(text.matches(RED).count(), 1);
+}
+
+#[test]
+fn the_today_colour_adds_codes_only_and_is_absent_without_colour_or_in_json() {
+    let (_, (coloured, plain, never, json)) = on_one_day(|day| {
+        let sandbox = due_dates_copy("today-plain", day);
+        (
+            stdout(&search(&sandbox, &["--color", "always"])),
+            stdout(&search(&sandbox, &[])),
+            stdout(&search(&sandbox, &["--color", "never"])),
+            stdout(&search(&sandbox, &["--json", "--color", "always"])),
+        )
+    });
+
+    assert_eq!(coloured.replace(RED, "").replace(MAGENTA, "").replace(HEADER, "").replace(RESET, ""), plain);
+    assert!(!plain.contains('\x1b') && !never.contains('\x1b') && !json.contains('\x1b'));
+}
+
+#[test]
+fn due_today_agrees_with_the_due_today_search() {
+    let (_, (today_rows, due_today)) = on_one_day(|day| {
+        let sandbox = due_dates_copy("today-agrees", day);
+        let coloured = stdout(&search(&sandbox, &["--color", "always"]));
+        let magenta: Vec<String> =
+            coloured.lines().filter(|l| l.contains(MAGENTA)).map(|l| l.split("  ").next().unwrap().trim().to_string()).collect();
+        let found: Vec<String> = ids_in_json(&search(&sandbox, &["due:today", "--json"]));
+        (magenta, found)
+    });
+
+    assert_eq!(today_rows, vec!["Today task"]);
+    assert_eq!(due_today, vec!["now"], "the task the colour marks is the one `due:today` finds");
+}
+
+#[test]
+fn search_help_describes_all_four_colours() {
+    let sandbox = Sandbox::new("today-help");
+
+    let text = stdout(&search(&sandbox, &["--help"]));
+
+    for needle in ["bold cyan", "yellow", "magenta", "red", "due today"] {
+        assert!(text.contains(needle), "{needle}");
+    }
 }

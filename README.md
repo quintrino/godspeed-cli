@@ -416,13 +416,14 @@ If the local copy is a day or more old, a note says so on stderr.
 
 ### Colour
 
-In a terminal, three things are coloured:
+In a terminal, four things are coloured:
 
 - **The due date of an overdue task is red**, so overdue tasks stand out in a long list. Only the date: not the rest of the row, or the dates of tasks that aren't overdue.
+- **The due date of a task due today is magenta**: that date is today and the task is not overdue yet, whether it is a date with no time or a time later today. Once a time has passed, the task is overdue and its date turns red.
 - **The list is yellow**, in every row that has one (the whole cell, as shown, so a task in several lists has them all in yellow). A task with no list has nothing to colour.
 - **The header row is bold cyan**, so the column labels stand apart from the rows. It is the same in grouped output, where it comes once at the top.
 
-Each has its own colour (red, yellow, cyan), so an overdue task's row shows a yellow list and a red date. Nothing else is coloured, including the title, the labels and the group headings.
+Each has its own colour (red, magenta, yellow, cyan), so an overdue task's row shows a yellow list and a red date. Nothing else is coloured, including the title, the labels and the group headings.
 
 A task is overdue when its effective due date has passed. That is the later of its due date and its snooze date, the same as `due` in a search. So:
 
@@ -431,7 +432,7 @@ A task is overdue when its effective due date has passed. That is the later of i
 - a task snoozed past its due date is not overdue until the snooze ends;
 - a task with no due date, and a completed task, is never overdue.
 
-`due<today` finds the same tasks (for dates without a time), so a search can list exactly the red ones.
+`due<today` finds the red tasks that have a date with no time, and `due:today` finds all the magenta ones (plus any task whose due time earlier today has already passed, which is red).
 
 | `--color WHEN` | Meaning |
 | --- | --- |

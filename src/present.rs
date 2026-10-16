@@ -1,7 +1,7 @@
 //! Putting search results in order, grouping them, applying `limit:`, and printing them as a
 //! fixed-width table or as JSON.
 
-use crate::eval::{Context, Named};
+use crate::eval::{Context, DueStatus, Named};
 use crate::query::{DateField, GroupField, GroupSpec, NumField, Query, SortField, SortSpec};
 use crate::store::StoredTask;
 use chrono::NaiveDateTime;
@@ -229,9 +229,10 @@ fn row_cells(task: &StoredTask, ctx: &Context) -> [String; 4] {
     ]
 }
 
-/// ANSI escape codes: red, yellow and bold cyan text, and going back to normal.
+/// ANSI escape codes: red, yellow, magenta and bold cyan text, and going back to normal.
 const RED: &str = "\x1b[31m";
 const YELLOW: &str = "\x1b[33m";
+const MAGENTA: &str = "\x1b[35m";
 const HEADER: &str = "\x1b[1;36m";
 const RESET: &str = "\x1b[0m";
 
@@ -274,15 +275,17 @@ fn header_line(color: bool) -> String {
 }
 
 /// The colours of one row. With `color`, the list is yellow, and the due date is red if the task
-/// is overdue. Everything else is plain.
+/// is overdue or magenta if it is due today. Everything else is plain.
 fn row_styles(task: &StoredTask, ctx: &Context, color: bool) -> Styles {
     if !color {
         return PLAIN;
     }
     let mut styles = PLAIN;
     styles[LIST_COLUMN] = Some(YELLOW);
-    if ctx.is_overdue(task) {
-        styles[DUE_COLUMN] = Some(RED);
+    match ctx.due_status(task) {
+        Some(DueStatus::Overdue) => styles[DUE_COLUMN] = Some(RED),
+        Some(DueStatus::Today) => styles[DUE_COLUMN] = Some(MAGENTA),
+        None => {}
     }
     styles
 }
@@ -322,8 +325,8 @@ fn limit_groups(groups: &mut Vec<Group<'_>>, limit: usize) {
 /// are kept, so a group listed first (`group:label:Eternal|...`) is never cut to make room for a
 /// later one, however the tasks inside it sort.
 ///
-/// With `color`, the table is coloured: the header bold cyan, the list yellow, and the due date of
-/// an overdue task red. JSON is never coloured.
+/// With `color`, the table is coloured: the header bold cyan, the list yellow, and the due date
+/// red if the task is overdue or magenta if it is due today. JSON is never coloured.
 pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: bool, color: bool) -> String {
     sort_tasks(&mut tasks, &query.sorts, ctx);
 
@@ -776,7 +779,7 @@ mod tests {
 
     /// The same text without the colour codes.
     fn uncoloured(text: &str) -> String {
-        text.replace(RED, "").replace(YELLOW, "").replace(HEADER, "").replace(RESET, "")
+        text.replace(RED, "").replace(YELLOW, "").replace(MAGENTA, "").replace(HEADER, "").replace(RESET, "")
     }
 
     fn coloured_run(text: &str, tasks: &[StoredTask]) -> String {
@@ -797,8 +800,10 @@ mod tests {
 
         for line in out.lines().skip(1) {
             let overdue = line.starts_with("Task overdue") || line.starts_with("Task yesterday");
+            let today = line.starts_with("Task today");
             assert_eq!(line.contains(RED), overdue, "{line:?}");
-            if !overdue {
+            assert_eq!(line.contains(MAGENTA), today, "{line:?}");
+            if !overdue && !today {
                 assert!(!line.contains('\x1b'), "{line:?}");
             }
         }
@@ -809,7 +814,7 @@ mod tests {
         assert!(overdue_row.contains(&format!("{RED}2020-01-01{RESET}")), "{overdue_row:?}");
         assert!(yesterday_row.contains(&format!("{RED}2026-10-14{RESET}")), "{yesterday_row:?}");
         assert!(!overdue_row.starts_with(RED), "the title is not red: {overdue_row:?}");
-        assert_eq!(out.matches(RESET).count(), 3, "two overdue dates and the header");
+        assert_eq!(out.matches(RESET).count(), 4, "two overdue dates, the date due today, and the header");
         assert!(!out.lines().next().unwrap().contains(RED), "the header is not red");
     }
 
@@ -1106,6 +1111,77 @@ mod tests {
     fn json_has_no_yellow() {
         let out = render(&query(""), vec![&task("a", json!({"list_id": "l-work"}))], &context(), true, true);
         assert!(!out.contains('\x1b'));
+    }
+
+    #[test]
+    fn the_due_date_of_a_task_due_today_is_magenta() {
+        let tasks = [dated("today", Some("2026-10-15"), false)];
+
+        let out = coloured_run("", &tasks);
+
+        let row = out.lines().nth(1).unwrap();
+        assert!(row.contains(&format!("{MAGENTA}2026-10-15{RESET}")), "{row:?}");
+        assert!(!row.contains(RED), "due today is not overdue: {row:?}");
+        assert_eq!(MAGENTA, "\x1b[35m");
+    }
+
+    #[test]
+    fn today_overdue_and_later_are_three_different_things() {
+        let tasks = [
+            dated("overdue", Some("2020-01-01"), false),
+            dated("today", Some("2026-10-15"), false),
+            dated("tomorrow", Some("2026-10-16"), false),
+            dated("undated", None, false),
+        ];
+
+        let out = coloured_run("", &tasks);
+
+        let row = |title: &str| out.lines().find(|l| l.starts_with(&format!("Task {title}"))).unwrap().to_string();
+        assert!(row("overdue").contains(RED) && !row("overdue").contains(MAGENTA));
+        assert!(row("today").contains(MAGENTA) && !row("today").contains(RED));
+        assert!(!row("tomorrow").contains('\x1b'), "{:?}", row("tomorrow"));
+        assert!(!row("undated").contains('\x1b'));
+        assert_ne!(RED, MAGENTA);
+        assert_ne!(MAGENTA, YELLOW);
+        assert_ne!(MAGENTA, HEADER);
+    }
+
+    #[test]
+    fn a_task_due_today_that_is_completed_is_not_coloured() {
+        let tasks = [dated("done", Some("2026-10-15"), true)];
+
+        let out = render(&query("is:complete"), tasks.iter().collect(), &context(), false, true);
+
+        assert!(!out.contains(MAGENTA), "{out:?}");
+    }
+
+    #[test]
+    fn a_task_due_today_has_a_yellow_list_and_a_magenta_date_and_nothing_else_coloured() {
+        let t = task("a", json!({"list_id": "l-work", "timeless_due_at": "2026-10-15", "label_ids": ["x-low"]}));
+
+        let row = coloured_run("", &[t]).lines().nth(1).unwrap().to_string();
+
+        assert!(row.contains(&format!("{YELLOW}Work{RESET}")) && row.contains(&format!("{MAGENTA}2026-10-15{RESET}")), "{row:?}");
+        assert_eq!(row.matches('\x1b').count(), 4, "{row:?}");
+        assert!(row.starts_with("Task a") && row.ends_with("Low"));
+    }
+
+    #[test]
+    fn colour_for_today_does_not_change_the_text_or_the_columns() {
+        let tasks = [
+            task("a", json!({"list_id": "l-work", "timeless_due_at": "2026-10-15", "label_ids": ["x-low"]})),
+            task("b", json!({"list_id": "l-home", "timeless_due_at": "2020-01-01"})),
+        ];
+
+        assert_eq!(uncoloured(&coloured_run("", &tasks)), run("", &tasks));
+        assert_eq!(uncoloured(&coloured_run("group:list", &tasks)), run("group:list", &tasks));
+    }
+
+    #[test]
+    fn nothing_is_magenta_without_colour_and_json_has_none() {
+        let tasks = [dated("today", Some("2026-10-15"), false)];
+        assert!(!run("", &tasks).contains('\x1b'));
+        assert!(!render(&query(""), tasks.iter().collect(), &context(), true, true).contains('\x1b'));
     }
 
     #[test]
