@@ -262,6 +262,9 @@ impl Sandbox {
             .env_clear()
             .env("HOME", &self.data_home)
             .env("XDG_DATA_HOME", &self.data_home)
+            // With no PATH at all the system default is searched, which on macOS would find
+            // osascript and show real notifications while the tests run.
+            .env("PATH", "/nonexistent")
             .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

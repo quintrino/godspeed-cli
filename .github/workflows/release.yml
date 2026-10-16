@@ -12,8 +12,27 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.os }}
+
+      # The end-to-end tests run the real binary against a mock API on localhost.
+      - name: Test
+        run: cargo test --locked
+
   build:
     name: Build ${{ matrix.target }}
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
