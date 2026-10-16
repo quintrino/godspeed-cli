@@ -211,14 +211,20 @@ Create tasks in Godspeed, and search them, from the command line.
 ## USAGE
 > godspeed-cli add [--json] [--] <TASK>...
 > echo "<TASK>" | godspeed-cli add
+> godspeed-cli edit [OPTIONS] <ID | WORDS>...
+> godspeed-cli lists [--id] [--json] [STRING]...
+> godspeed-cli labels [--id] [--json] [STRING]...
 > godspeed-cli refresh [--full] [--include-completed] [--json]
-> godspeed-cli search [--json] [--refresh] [--max-age AGE] [--color WHEN] [QUERY]...
+> godspeed-cli search [--json] [--id] [--refresh] [--max-age AGE] [--color WHEN] [QUERY]...
 > godspeed-cli completions <bash|fish|zsh>
 > godspeed-cli <command> --help
 > godspeed-cli --help | --version
 
 ## COMMANDS
 - add => Create a task. The task is the rest of the line, or stdin if there is none. `godspeed-cli add --help` explains the task syntax and how list and label names are matched.
+- edit => Change a task: edit it, complete it, snooze it, delete it or move it to another list, by its id. `godspeed-cli edit --help` has the details.
+- lists => Show your lists, or only those matching a string. --id shows their ids.
+- labels => Show your labels, or only those matching a string. --id shows their ids.
 - refresh => Keep a local copy of your tasks, lists and labels, for searching. The first refresh downloads everything; after that only what changed is fetched, which is quick. --full rebuilds the copy from scratch. `godspeed-cli refresh --help` has the details.
 - search => Search the local copy made by `refresh`, offline. `godspeed-cli search --help` explains the query syntax.
 - completions => Print a script that adds tab completion for godspeed-cli to your shell, including the names of your lists and labels. `godspeed-cli completions --help` says how to install it.
@@ -228,6 +234,7 @@ There are no other commands. A task is always created with `add`, so `godspeed-c
 ## OPTIONS
 - -h, --help => Print this help and exit. After a command, print that command's help.
 - -V, --version => Print the version and exit.
+- --debug => With any command, print what the program is doing (requests, answers, and the choices made) to stderr, to help find out why something doesn't work. The token is never printed. For `add` it only counts straight after `add`, so a task can contain the word.
 
 ## TASK SYNTAX (for add)
 - .label => Add a label (single word). Removed from the title.
@@ -380,7 +387,7 @@ pub const SEARCH_HELP: &str = r#"
 Search the local copy of your tasks made by `godspeed-cli refresh`. Works offline. The query language follows Godspeed's search operators guide.
 
 ## USAGE
-> godspeed-cli search [--json] [--refresh] [--max-age AGE] [--color WHEN] [QUERY]...
+> godspeed-cli search [--json] [--id] [--refresh] [--max-age AGE] [--color WHEN] [QUERY]...
 
 By default only incomplete tasks are searched. is:complete (not part of Godspeed's guide) and is:uncleared add completed tasks; they are only in the local copy if you refreshed with --include-completed. With no query, every incomplete task is listed. The words of the query are joined with spaces, so quote the whole query when it contains characters the shell would use, such as ( ) | & ! < > "
 
@@ -457,6 +464,8 @@ Target lists: group:label:p0|p1|p2 makes those groups, in that order, and puts a
 - enable:nested  disable:nested => Accepted, but results are always a flat list.
 
 ## OPTIONS
+- --id => Add a column with each task's id, which `godspeed-cli edit` takes. JSON always has the id.
+- --debug => Print what the program is doing to stderr.
 - --refresh => Update the local copy first (an incremental refresh when possible). Needs a token. If the refresh fails, the existing copy is searched, with a note on stderr.
 - --max-age AGE => Update the copy first if it is older than AGE, such as 30m, 6h, "2 days" or 0 (always). "never" turns off a max_age from the settings file.
 - --color WHEN => Colour the table: the header is bold cyan, the list is yellow, the due date of a task due today is magenta, and the due date of an overdue task is red. Never JSON. WHEN is auto (the default: only on a terminal, and not if NO_COLOR is set or TERM is dumb), always (for `| less -R`, and overriding NO_COLOR) or never. A task is overdue when its effective due date (the later of its due date and its snooze date) has passed: a date with no time from the day after, a date with a time once that time has passed. A task due today has that date as its effective due date and isn't overdue yet. Completed tasks are never either.
@@ -470,6 +479,89 @@ Target lists: group:label:p0|p1|p2 makes those groups, in that order, and puts a
 - 2 => The query is invalid, or `refresh` hasn't been run yet.
 
 Messages ("No matching tasks.", a note that the copy is old) go to stderr, so stdout holds only the results.
+"#;
+
+pub const LISTS_HELP: &str = r#"
+Show your lists, or only those whose name contains a string.
+
+## USAGE
+> godspeed-cli lists [--id] [--json] [--color WHEN] [--debug] [STRING]...
+
+## EXAMPLES
+> godspeed-cli lists
+> godspeed-cli lists work
+> godspeed-cli lists --id home
+
+## OPTIONS
+- STRING => Only show lists whose name contains it, ignoring case (and spaces, slashes and dashes, so `workproj` finds "Work Projects"). Several words are joined with spaces.
+- --id => Add a column with each list's id.
+- --json => Print the lists as JSON, as the API describes them.
+- --color WHEN => auto (the default), always or never.
+- --debug => Print what the program is doing to stderr, to help find out why something doesn't work. The token is never printed.
+- -- => End the options.
+- -h, --help => Print this help.
+
+The lists come from Godspeed when there is a token, and from the local copy made by `refresh` when there isn't or Godspeed can't be reached.
+"#;
+
+pub const LABELS_HELP: &str = r#"
+Show your labels, or only those whose name contains a string.
+
+## USAGE
+> godspeed-cli labels [--id] [--json] [--color WHEN] [--debug] [STRING]...
+
+## EXAMPLES
+> godspeed-cli labels
+> godspeed-cli labels urgent
+> godspeed-cli labels --id sever
+
+## OPTIONS
+- STRING => Only show labels whose name, or label group, contains it, ignoring case (and spaces, slashes and dashes). Several words are joined with spaces.
+- --id => Add a column with each label's id.
+- --json => Print the labels as JSON, as the API describes them.
+- --color WHEN => auto (the default), always or never.
+- --debug => Print what the program is doing to stderr, to help find out why something doesn't work. The token is never printed.
+- -- => End the options.
+- -h, --help => Print this help.
+
+The labels come from Godspeed when there is a token, and from the local copy made by `refresh` when there isn't or Godspeed can't be reached.
+"#;
+
+pub const EDIT_HELP: &str = r#"
+Change a task: edit it, complete it, snooze it, delete it, or move it to another list.
+
+## USAGE
+> godspeed-cli edit [OPTIONS] <ID | WORDS>...
+> godspeed-cli edit <ID>
+
+With only a task, a menu asks what to do. With options, they are done straight away, which suits scripts. The task is its id (`godspeed-cli search --id` shows them), or words from its title: they are looked up in the local copy made by `refresh`, and if several tasks match you choose one (or, with options, are shown their ids). An id that isn't in the local copy is used as it is.
+
+## EXAMPLES
+> godspeed-cli edit 5a1b2c3d
+> godspeed-cli edit 5a1b2c3d --complete
+> godspeed-cli edit "buy milk" --snooze tomorrow
+> godspeed-cli edit 5a1b2c3d --title "Buy oat milk" --move home
+> godspeed-cli edit 5a1b2c3d --delete --yes
+
+## OPTIONS
+- --title TEXT => Change the title.
+- --notes TEXT => Change the notes. An empty string clears them.
+- --complete => Mark the task complete.
+- --incomplete => Mark a completed task incomplete again.
+- --snooze WHEN => Snooze until WHEN: tomorrow, friday, "friday 9am", 3h, "in 2 days", 2026-10-31 or 20261031. A day with no time snoozes for the whole day. A time in the past is refused.
+- --move LIST => Move to the list whose name is LIST, or starts with or contains it, ignoring case, spaces and dashes.
+- --delete => Delete the task, after asking. It can't be undone.
+- -y, --yes => Don't ask before deleting.
+- --debug => Print what the program is doing to stderr. The token is never printed.
+- -- => End the options.
+- -h, --help => Print this help.
+
+Options can be combined, except --delete, which stands alone. The local copy is updated too, so a search sees the change at once; `refresh` brings in Godspeed's own version later. Needs a token. The menu and its questions are on stderr, and the result on stdout.
+
+## EXIT STATUS
+- 0 => Done (or nothing to do, or you chose not to delete).
+- 1 => Godspeed couldn't be reached or refused the change.
+- 2 => The input can't be used: no token, an unknown option, no such task or list, an unreadable date.
 "#;
 
 pub const COMPLETIONS_HELP: &str = r#"
@@ -651,8 +743,8 @@ mod tests {
         assert_eq!(out, "intro text\n\nS:\n    body text\n");
     }
 
-    fn pages() -> [(&'static str, &'static str); 5] {
-        [("main", HELP), ("add", ADD_HELP), ("refresh", REFRESH_HELP), ("search", SEARCH_HELP), ("completions", COMPLETIONS_HELP)]
+    fn pages() -> [(&'static str, &'static str); 8] {
+        [("main", HELP), ("add", ADD_HELP), ("refresh", REFRESH_HELP), ("search", SEARCH_HELP), ("completions", COMPLETIONS_HELP), ("lists", LISTS_HELP), ("labels", LABELS_HELP), ("edit", EDIT_HELP)]
     }
 
     #[test]

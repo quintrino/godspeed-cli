@@ -95,7 +95,13 @@ pub fn load_from(path: &Path) -> Result<Config, String> {
 
 /// The settings, or the defaults if there is no settings file.
 pub fn load() -> Result<Config, String> {
-    load_from(&paths::config_path())
+    let path = paths::config_path();
+    debug!("settings file: {} ({})", path.display(), if path.exists() { "found" } else { "not there, using the defaults" });
+    let config = load_from(&path);
+    if let Ok(config) = &config {
+        debug!("settings: {config:?}");
+    }
+    config
 }
 
 #[cfg(test)]

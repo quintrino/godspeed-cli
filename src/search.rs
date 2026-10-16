@@ -3,6 +3,7 @@
 //! It works offline unless asked to refresh first (`--refresh`, `--max-age`, or `max_age` in
 //! the config file); only then does it need a token and the network.
 
+use crate::color::{self, ColorMode};
 use crate::config::{self, Age};
 use crate::eval::Context;
 use crate::refresh;
@@ -10,45 +11,14 @@ use crate::store::{Facts, Store, StoredTask};
 use crate::{exit, paths, present, query, token};
 use chrono::{DateTime, Local, Utc};
 use serde_json::Value;
-use std::env;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::process::ExitCode;
-
-/// When to colour the output: `--color auto|always|never`.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum ColorMode {
-    /// Only when output goes to a terminal, and not if `NO_COLOR` is set.
-    #[default]
-    Auto,
-    Always,
-    Never,
-}
-
-impl ColorMode {
-    fn parse(word: &str) -> Option<ColorMode> {
-        match word {
-            "auto" => Some(ColorMode::Auto),
-            "always" => Some(ColorMode::Always),
-            "never" => Some(ColorMode::Never),
-            _ => None,
-        }
-    }
-}
-
-/// Whether to colour the output. `--color always` and `never` are absolute. Otherwise colour is
-/// used for a terminal, unless `NO_COLOR` is set to something (see no-color.org) or the terminal
-/// is `dumb`.
-fn color_enabled(mode: ColorMode, is_terminal: bool, no_color: Option<&str>, term: Option<&str>) -> bool {
-    match mode {
-        ColorMode::Always => true,
-        ColorMode::Never => false,
-        ColorMode::Auto => is_terminal && no_color.is_none_or(str::is_empty) && term != Some("dumb"),
-    }
-}
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct SearchArgs {
     json: bool,
+    /// Add a column with each task's id.
+    id: bool,
     color: ColorMode,
     /// Refresh the copy before searching.
     refresh: bool,
@@ -57,7 +27,7 @@ struct SearchArgs {
     query: Vec<String>,
 }
 
-/// `--json`, `--refresh`, `--max-age AGE` and `--color WHEN` (or `--max-age=AGE`, `--color=WHEN`)
+/// `--json`, `--id`, `--refresh`, `--max-age AGE` and `--color WHEN` (or `--max-age=AGE`, `--color=WHEN`)
 /// can go anywhere; `--` ends the
 /// options, so a query can contain them. Everything else is the query. A lone leading `-` is a
 /// negation, not an option.
@@ -95,6 +65,7 @@ fn parse_args(args: &[String]) -> Result<SearchArgs, String> {
         match arg.as_str() {
             "--" => options_done = true,
             "--json" => parsed.json = true,
+            "--id" => parsed.id = true,
             "--refresh" => parsed.refresh = true,
             _ => parsed.query.push(arg.clone()),
         }
@@ -187,6 +158,8 @@ pub fn run_search(args: &[String]) -> ExitCode {
     // Bring the copy up to date first, if asked to or if it is too old.
     let had_copy = paths::store_path().exists();
     let facts = existing_facts().unwrap_or_default();
+    debug!("search: query {:?}, local copy {} (refreshed {:?})", args.query, if had_copy { "exists" } else { "missing" }, facts.refreshed_at);
+    debug!("search: --refresh {}, --max-age {:?}, config max_age {:?}", args.refresh, args.max_age, config.max_age);
     if refresh_wanted(&args, config.max_age, facts.refreshed_at.as_deref(), Utc::now()) {
         let refreshed = match token::load_token() {
             Some(api_key) => {
@@ -233,18 +206,13 @@ pub fn run_search(args: &[String]) -> ExitCode {
 
     let context = Context::new(&loaded.lists, &loaded.labels, now);
     let matched: Vec<&StoredTask> = loaded.tasks.iter().filter(|task| context.matches(&query.expr, task)).collect();
+    debug!("search: {} of {} tasks in the copy match", matched.len(), loaded.tasks.len());
     if matched.is_empty() && !args.json {
         eprintln!("No matching tasks.");
     }
 
-    let color = !args.json
-        && color_enabled(
-            args.color,
-            io::stdout().is_terminal(),
-            env::var("NO_COLOR").ok().as_deref(),
-            env::var("TERM").ok().as_deref(),
-        );
-    let output = present::render(&query, matched, &context, args.json, color);
+    let color = !args.json && color::stdout_color(args.color);
+    let output = present::render_with(&query, matched, &context, args.json, color, args.id);
     if !output.is_empty() {
         // Ignore a closed pipe (`... | head`) instead of panicking.
         let _ = writeln!(io::stdout(), "{output}");
@@ -307,24 +275,6 @@ mod tests {
         assert!(parse_args(&args(&["--color"])).unwrap_err().contains("needs auto, always or never"));
         assert!(parse_args(&args(&["--color", "red"])).unwrap_err().contains("'red' isn't auto, always or never"));
         assert!(parse_args(&args(&["--color=sometimes"])).is_err());
-    }
-
-    #[test]
-    fn colour_is_used_for_a_terminal_unless_no_color_or_a_dumb_terminal_say_otherwise() {
-        let on = |mode, tty, no_color: Option<&str>, term: Option<&str>| color_enabled(mode, tty, no_color, term);
-        // Auto: only for a terminal.
-        assert!(on(ColorMode::Auto, true, None, Some("xterm-256color")));
-        assert!(on(ColorMode::Auto, true, None, None));
-        assert!(!on(ColorMode::Auto, false, None, Some("xterm")), "not for a pipe or a file");
-        // NO_COLOR, when set to anything non-empty, turns it off; empty counts as unset.
-        assert!(!on(ColorMode::Auto, true, Some("1"), Some("xterm")));
-        assert!(!on(ColorMode::Auto, true, Some("anything"), None));
-        assert!(on(ColorMode::Auto, true, Some(""), Some("xterm")));
-        // A dumb terminal can't show colour.
-        assert!(!on(ColorMode::Auto, true, None, Some("dumb")));
-        // The flag overrides all of that.
-        assert!(on(ColorMode::Always, false, Some("1"), Some("dumb")));
-        assert!(!on(ColorMode::Never, true, None, Some("xterm")));
     }
 
     #[test]

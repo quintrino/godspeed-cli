@@ -65,6 +65,8 @@ echo "Buy groceries and cook dinner" | godspeed-cli add
 | Command | |
 | --- | --- |
 | `add` | Create a task. `add --json` also prints the API's response. See [add --json](#add---json). |
+| `edit` | Edit, complete, snooze, delete or move a task, by id. See [Edit](#edit). |
+| `lists`, `labels` | Show your lists or labels, or those matching a string. See [Lists and labels](#lists-and-labels). |
 | `refresh` | Keep a local copy of your tasks, lists and labels. See [Refresh](#refresh). |
 | `search` | Search the local copy made by `refresh`, offline. See [Search](#search). |
 | `completions` | Print a shell completion script for bash, zsh or fish. See [Shell completions](#shell-completions). |
@@ -97,6 +99,7 @@ godspeed-cli add --json "Pay rent @Home" | jq -r '.todo_item.id'
 | --- | --- |
 | `-h`, `--help` | Print the usage and the settings, then exit. After a command, print that command's own help (see [Getting help](#getting-help)). |
 | `-V`, `--version` | Print the version, then exit. |
+| `--debug` | With any command, print what the program is doing to stderr. See [Debugging](#debugging). |
 
 These are only recognised as the first argument (or straight after `add`), so `godspeed-cli add "fix the --version bug"` still creates a task. `--help` and `--version` don't need `GODSPEED_TOKEN` and never create a task.
 
@@ -457,6 +460,75 @@ Search reads these fields from each task's JSON: `title`, `notes`, `attachments`
 
 `title`, `notes`, `list_id`, `label_ids`, `timeless_due_at` and `duration_minutes` are the fields that task creation sends. The others were taken from another Godspeed client and have **not been checked against a real account**; in particular, how folders and label groups are represented is a guess. If an operator never matches, look at what the API returned for one of your tasks (`sqlite3 ~/.local/share/godspeed-cli/cache.sqlite3 'select json from tasks limit 1'`) and compare the field names. They are all read in `src/eval.rs`.
 
+## Lists and labels
+
+```bash
+godspeed-cli lists                 # all your lists
+godspeed-cli lists work            # only lists whose name contains "work"
+godspeed-cli labels --id urgent    # matching labels, with their ids
+```
+
+`lists` and `labels` print a table of names. A string limits it to the names containing it, ignoring case, spaces, slashes and dashes (`workproj` finds "Work Projects"); several words are joined with spaces. For labels the label group's name is matched too. `--id` adds a column with each id, `--json` prints the items as the API describes them, and `--color auto|always|never` works as in `search`.
+
+The names come from Godspeed when there is a token. Without a token, or if Godspeed can't be reached, they come from the local copy made by `refresh` (with a note, in the second case). If there's neither, it's an error.
+
+## Task ids
+
+`search --id` adds an `ID` column to the table (JSON always has the id), and `lists --id` and `labels --id` do the same for lists and labels. A task's id is what `edit` takes.
+
+```bash
+godspeed-cli search --id 'due:today'
+```
+
+## Edit
+
+`godspeed-cli edit` changes a task: edit its title or notes, complete it, snooze it, delete it, or move it to another list. The task is its id, or words from its title (looked up in the local copy; if several match you choose one).
+
+```bash
+godspeed-cli edit 5a1b2c3d             # a menu asks what to do
+godspeed-cli edit "buy milk"           # the same, found by title
+godspeed-cli edit 5a1b2c3d --complete
+godspeed-cli edit 5a1b2c3d --snooze tomorrow
+godspeed-cli edit 5a1b2c3d --title "Buy oat milk" --move home
+godspeed-cli edit 5a1b2c3d --delete --yes
+```
+
+With just a task, a menu is shown on stderr:
+
+```
+Buy milk  [Home]  due 2026-10-20  id 5a1b2c3d
+  1) Edit the title
+  2) Edit the notes
+  3) Complete
+  4) Snooze
+  5) Delete
+  6) Move to another list
+  q) Quit
+```
+
+With options, they're done at once, which suits scripts:
+
+| Option | |
+| --- | --- |
+| `--title TEXT`, `--notes TEXT` | Change the title or notes (`--notes ""` clears them). |
+| `--complete`, `--incomplete` | Complete the task, or reopen a completed one. |
+| `--snooze WHEN` | Snooze until `tomorrow`, `friday`, `"friday 9am"`, `3h`, `2026-10-31` or `20261031`. A day with no time snoozes for the whole day (`timeless_snoozed_until`), otherwise it's a moment (`snoozed_until`). A time in the past is refused. |
+| `--move LIST` | Move to a list, matched as `@list` is in `add`. |
+| `--delete` | Delete the task, after asking `[y/N]`. `--yes` (`-y`) skips the question. It can't be undone, and can't be combined with other options. |
+
+These use `PATCH /tasks/:id` and `DELETE /tasks/:id`, sending only the fields that change. The local copy is updated as well, so `search` sees the change at once; the next `refresh` brings in Godspeed's own version. An id that isn't in the local copy is still tried. Exit status: `0` done, `1` Godspeed couldn't be reached or refused, `2` the input can't be used (no token, no such task or list, an unreadable date).
+
+## Debugging
+
+`--debug` on any command prints what the program is doing to **stderr**: the arguments, where the token came from (never its value), the settings file, the local copy, each request and answer (method, URL, headers without the token, body, status, time), and the choices made, such as which list a name matched. stdout is untouched, so `--json` output stays clean.
+
+```bash
+godspeed-cli --debug add "Buy milk @Home" 2> debug.log
+godspeed-cli edit 5a1b2c3d --complete --debug
+```
+
+It can go before the command or anywhere after it. For `add` it only counts straight after `add` (like `--json`), so `godspeed-cli add "fix the --debug flag"` still creates that task. Request and answer bodies are cut at 2000 characters. The token is replaced by `<secret>` wherever it would appear.
+
 ## Shell completions
 
 `godspeed-cli completions <shell>` prints a script that adds tab completion to **bash**, **zsh** or **fish**. Nothing is installed or changed until you use the script:
@@ -577,6 +649,14 @@ Make sure you've exported your API key:
 export GODSPEED_TOKEN="your-key"
 ```
 or that `~/.local/share/environment/Godspeed` contains an `export GODSPEED_TOKEN="your-key"` line.
+
+### `brew install` fails with "could not apply ... godspeed-cli 0.1.0.1"
+Homebrew keeps the tap as a git clone, and this error means its copy has diverged from the published one (an interrupted or conflicting update). Reset it and install again:
+```bash
+brew update-reset
+brew install quintrino/tap/godspeed-cli
+```
+If that still fails: `git -C "$(brew --repository quintrino/tap)" rebase --abort`, then `brew untap quintrino/tap && brew tap quintrino/tap`.
 
 ### List not found
 If your `@ListName` isn't being recognized:

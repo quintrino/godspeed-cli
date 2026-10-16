@@ -227,6 +227,56 @@ impl Store {
         Ok(tasks)
     }
 
+
+    /// Looks a task up by its id.
+    pub fn task(&self, id: &str) -> Result<Option<StoredTask>> {
+        match self.conn.query_row("SELECT json, is_complete FROM tasks WHERE id = ?1", params![id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }) {
+            Ok((json, complete)) => Ok(Some(StoredTask { json: serde_json::from_str(&json)?, complete: complete != 0 })),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Forgets a task, after it was deleted in Godspeed. True if the copy had it.
+    pub fn remove_task(&self, id: &str) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])? > 0)
+    }
+
+    /// Records in the copy a change that was just made in Godspeed, so a search sees it before
+    /// the next `refresh`. `fields` are the ones sent to the API; the ones the copy keeps are
+    /// written into the task, and setting one snooze field clears the other. The task's
+    /// `updated_at` is left as it was, so the next incremental refresh still brings the API's own
+    /// version. A task that is completed is removed unless the copy keeps completed tasks.
+    pub fn apply_edit(&self, id: &str, fields: &Value, complete: Option<bool>) -> Result<()> {
+        let Some(mut task) = self.task(id)? else { return Ok(()) };
+        let keeps_completed = self.facts()?.include_completed == Some(true);
+        let complete = complete.unwrap_or(task.complete);
+        if complete && !keeps_completed {
+            self.remove_task(id)?;
+            return Ok(());
+        }
+        if let (Some(object), Some(changes)) = (task.json.as_object_mut(), fields.as_object()) {
+            for key in ["title", "notes", "list_id", "snoozed_until", "timeless_snoozed_until"] {
+                if let Some(value) = changes.get(key) {
+                    object.insert(key.to_string(), value.clone());
+                }
+            }
+            if changes.contains_key("snoozed_until") {
+                object.remove("timeless_snoozed_until");
+            }
+            if changes.contains_key("timeless_snoozed_until") {
+                object.remove("snoozed_until");
+            }
+        }
+        self.conn.execute(
+            "UPDATE tasks SET json = ?2, is_complete = ?3 WHERE id = ?1",
+            params![id, serde_json::to_string(&task.json)?, i64::from(complete)],
+        )?;
+        Ok(())
+    }
+
     pub fn lists(&self) -> Result<Vec<Value>> {
         self.json_rows("SELECT json FROM lists ORDER BY rowid")
     }

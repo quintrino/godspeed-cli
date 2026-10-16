@@ -9,14 +9,30 @@ pub fn load_token() -> Option<String> {
     if let Ok(token) = env::var("GODSPEED_TOKEN") {
         let token = token.trim();
         if !token.is_empty() {
+            crate::debug::add_secret(token);
+            debug!("token: using GODSPEED_TOKEN from the environment ({} characters)", token.chars().count());
             return Some(token.to_string());
         }
     }
+    debug!("token: GODSPEED_TOKEN is not set in the environment");
 
     let path = token_file_path();
     match fs::read_to_string(&path) {
-        Ok(text) => parse_token_assignment(&text),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Ok(text) => {
+            let token = parse_token_assignment(&text);
+            match &token {
+                Some(token) => {
+                    crate::debug::add_secret(token);
+                    debug!("token: using the GODSPEED_TOKEN line of {} ({} characters)", path.display(), token.chars().count());
+                }
+                None => debug!("token: {} has no GODSPEED_TOKEN line", path.display()),
+            }
+            token
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            debug!("token: {} does not exist", path.display());
+            None
+        }
         Err(e) => {
             eprintln!("Warning: cannot read {}: {}", path.display(), e);
             None

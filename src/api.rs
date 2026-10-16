@@ -1,25 +1,19 @@
 use crate::task::TaskRequest;
+use reqwest::{Method, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
+use std::time::Instant;
 
 type ApiResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Deserialize, Debug)]
-struct ListsResponse {
-    lists: Vec<NamedItem>,
-}
-
-#[derive(Deserialize, Debug)]
-struct LabelsResponse {
-    labels: Vec<NamedItem>,
-}
-
-#[derive(Deserialize, Debug)]
-struct NamedItem {
-    id: String,
-    name: String,
+struct ItemsResponse {
+    #[serde(default)]
+    lists: Vec<Value>,
+    #[serde(default)]
+    labels: Vec<Value>,
 }
 
 /// The API endpoint for `path`. `GODSPEED_API_URL` replaces the base URL so the tests can point
@@ -29,30 +23,109 @@ fn api_url(path: &str) -> String {
     format!("{}/{path}", base.trim_end_matches('/'))
 }
 
-fn name_to_id(items: Vec<NamedItem>) -> HashMap<String, String> {
-    items.into_iter().map(|item| (item.name.to_lowercase(), item.id)).collect()
+/// What the API answered: the status, the `Retry-After` delay if any, and the body as text.
+struct Answer {
+    status: StatusCode,
+    retry_after: Option<u64>,
+    body: String,
+}
+
+/// Sends a request, and with `--debug` logs it and the answer. The token is not logged.
+fn call(
+    method: Method,
+    path: &str,
+    api_key: &str,
+    query: &[(&str, &str)],
+    body: Option<&Value>,
+) -> ApiResult<Answer> {
+    let url = api_url(path);
+    let mut request = reqwest::blocking::Client::new()
+        .request(method.clone(), &url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Accept", "application/json");
+    if !query.is_empty() {
+        request = request.query(query);
+    }
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    debug!("request: {method} {url}{}", if query.is_empty() { String::new() } else { format!(" query {query:?}") });
+    debug!("request headers: Authorization: Bearer <token>, Accept: application/json");
+    if let Some(body) = body {
+        debug!("request body: {}", crate::debug::shorten(&body.to_string()));
+    }
+    let started = Instant::now();
+    let response = match request.send() {
+        Ok(response) => response,
+        Err(e) => {
+            debug!("request failed after {} ms: {e}", started.elapsed().as_millis());
+            return Err(Box::new(e));
+        }
+    };
+    let status = response.status();
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok());
+    let text = response.text()?;
+    debug!("response: {status} in {} ms, {} bytes", started.elapsed().as_millis(), text.len());
+    debug!("response body: {}", crate::debug::shorten(&text));
+    Ok(Answer { status, retry_after, body: text })
+}
+
+fn parse_body<T: serde::de::DeserializeOwned>(answer: &Answer) -> ApiResult<T> {
+    Ok(serde_json::from_str(&answer.body)?)
+}
+
+/// "API error: 404 Not Found", plus the API's own message if its body has one.
+fn api_error(answer: &Answer) -> String {
+    let detail = serde_json::from_str::<Value>(&answer.body).ok().and_then(|value| {
+        ["message", "error"].iter().find_map(|key| value.get(*key).and_then(Value::as_str).map(str::to_string))
+    });
+    match detail {
+        Some(detail) => format!("API error: {} ({detail})", answer.status),
+        None => format!("API error: {}", answer.status),
+    }
+}
+
+fn expect_success(answer: &Answer) -> ApiResult<()> {
+    if answer.status.is_success() {
+        Ok(())
+    } else {
+        Err(api_error(answer).into())
+    }
+}
+
+fn name_to_id(items: &[Value]) -> HashMap<String, String> {
+    items
+        .iter()
+        .filter_map(|item| Some((item.get("name")?.as_str()?.to_lowercase(), item.get("id")?.as_str()?.to_string())))
+        .collect()
+}
+
+/// All lists as the API describes them, in the order it gives them.
+pub fn fetch_list_items(api_key: &str) -> ApiResult<Vec<Value>> {
+    let answer = call(Method::GET, "lists", api_key, &[], None)?;
+    expect_success(&answer)?;
+    Ok(parse_body::<ItemsResponse>(&answer)?.lists)
+}
+
+/// All labels as the API describes them, in the order it gives them.
+pub fn fetch_label_items(api_key: &str) -> ApiResult<Vec<Value>> {
+    let answer = call(Method::GET, "labels", api_key, &[], None)?;
+    expect_success(&answer)?;
+    Ok(parse_body::<ItemsResponse>(&answer)?.labels)
 }
 
 /// All lists, as lowercase name -> id.
 pub fn fetch_lists(api_key: &str) -> ApiResult<HashMap<String, String>> {
-    let response = reqwest::blocking::Client::new()
-        .get(api_url("lists"))
-        .header("Authorization", format!("Bearer {}", api_key))
-        .send()?;
-
-    let lists: ListsResponse = response.json()?;
-    Ok(name_to_id(lists.lists))
+    Ok(name_to_id(&fetch_list_items(api_key)?))
 }
 
 /// All labels, as lowercase name -> id.
 pub fn fetch_labels(api_key: &str) -> ApiResult<HashMap<String, String>> {
-    let response = reqwest::blocking::Client::new()
-        .get(api_url("labels"))
-        .header("Authorization", format!("Bearer {}", api_key))
-        .send()?;
-
-    let labels: LabelsResponse = response.json()?;
-    Ok(name_to_id(labels.labels))
+    Ok(name_to_id(&fetch_label_items(api_key)?))
 }
 
 /// One page of `GET /tasks`. The API also returns the lists and labels the tasks use.
@@ -88,41 +161,34 @@ pub fn fetch_task_page(
     if let Some(after) = updated_after {
         query.push(("updated_after", after));
     }
-    let response = reqwest::blocking::Client::new()
-        .get(api_url("tasks"))
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Accept", "application/json")
-        .query(&query)
-        .send()
-        .map_err(|e| PageError::Failed(Box::new(e)))?;
-
-    let status = response.status();
-    if status.as_u16() == 429 {
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.trim().parse().ok());
-        return Err(PageError::RateLimited(retry_after));
+    let answer = call(Method::GET, "tasks", api_key, &query, None).map_err(PageError::Failed)?;
+    if answer.status.as_u16() == 429 {
+        return Err(PageError::RateLimited(answer.retry_after));
     }
-    if !status.is_success() {
-        return Err(PageError::Failed(format!("API error: {status}").into()));
+    if !answer.status.is_success() {
+        return Err(PageError::Failed(api_error(&answer).into()));
     }
-    response.json().map_err(|e| PageError::Failed(Box::new(e)))
+    parse_body(&answer).map_err(PageError::Failed)
 }
 
 /// Creates the task and returns what the API answered (`{}` if the answer wasn't JSON).
 pub fn send_task(task: &TaskRequest, api_key: &str) -> ApiResult<Value> {
-    let response = reqwest::blocking::Client::new()
-        .post(api_url("tasks"))
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(task)
-        .send()?;
+    let body = serde_json::to_value(task)?;
+    let answer = call(Method::POST, "tasks", api_key, &[], Some(&body))?;
+    expect_success(&answer)?;
+    Ok(serde_json::from_str(&answer.body).unwrap_or_else(|_| serde_json::json!({})))
+}
 
-    if response.status().is_success() {
-        Ok(response.json().unwrap_or_else(|_| serde_json::json!({})))
-    } else {
-        Err(format!("API error: {}", response.status()).into())
-    }
+/// `PATCH /tasks/:id` with only the fields to change. Returns what the API answered (`{}` if the
+/// answer wasn't JSON).
+pub fn update_task(task_id: &str, changes: &Value, api_key: &str) -> ApiResult<Value> {
+    let answer = call(Method::PATCH, &format!("tasks/{task_id}"), api_key, &[], Some(changes))?;
+    expect_success(&answer)?;
+    Ok(serde_json::from_str(&answer.body).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+/// `DELETE /tasks/:id`.
+pub fn delete_task(task_id: &str, api_key: &str) -> ApiResult<()> {
+    let answer = call(Method::DELETE, &format!("tasks/{task_id}"), api_key, &[], None)?;
+    expect_success(&answer)
 }

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.0: 2026-10-16
+
+### Added
+
+- **`godspeed-cli edit <id>`** changes a task: edit its title or notes, complete or reopen it, snooze it, delete it, or move it to another list. With just an id it shows a menu; with options (`--title`, `--notes`, `--complete`, `--incomplete`, `--snooze WHEN`, `--move LIST`, `--delete`, `--yes`) it does the change at once. The task can also be named by words from its title.
+- **`godspeed-cli lists [STRING]`** and **`godspeed-cli labels [STRING]`** show your lists and labels, only those matching the string if one is given.
+- **`--id`** adds the id to the output of `search`, `lists` and `labels`.
+- **`--debug`** on any command prints, on stderr, what the program is doing: the arguments, where the token came from, the settings, every request and answer, and the choices made. The token is never printed.
+- Tab completion knows the new commands and options.
+
+### Fixed
+
+- The release workflow no longer runs `git pull --rebase` in the Homebrew tap, which left it in a conflict ("could not apply ... godspeed-cli 0.1.0.1") when two releases collided. It now starts again from the tap's latest commit.
+
 ## 0.11.0: 2026-10-16
 
 The first release since 0.1.0.

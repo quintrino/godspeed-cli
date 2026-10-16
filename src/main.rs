@@ -1,11 +1,16 @@
+#[macro_use]
+mod debug;
 mod api;
+mod color;
 mod capture;
 mod completions;
 mod config;
 mod dates;
+mod edit;
 mod eval;
 mod exit;
 mod help;
+mod listing;
 mod names;
 mod notify;
 mod paths;
@@ -33,9 +38,15 @@ enum Invocation {
     AddJson(Vec<String>),
     Refresh(Vec<String>),
     Search(Vec<String>),
+    Lists(Vec<String>),
+    Labels(Vec<String>),
+    Edit(Vec<String>),
     AddHelp,
     RefreshHelp,
     SearchHelp,
+    ListsHelp,
+    LabelsHelp,
+    EditHelp,
     Completions(Vec<String>),
     CompletionsHelp,
     /// The hidden command the completion scripts call for names: `__complete lists|labels`.
@@ -77,6 +88,18 @@ fn parse_invocation(args: &[String]) -> Invocation {
             Some("-h" | "--help") => Invocation::SearchHelp,
             _ => Invocation::Search(rest.to_vec()),
         },
+        "lists" => match rest.first().map(String::as_str) {
+            Some("-h" | "--help") => Invocation::ListsHelp,
+            _ => Invocation::Lists(rest.to_vec()),
+        },
+        "labels" => match rest.first().map(String::as_str) {
+            Some("-h" | "--help") => Invocation::LabelsHelp,
+            _ => Invocation::Labels(rest.to_vec()),
+        },
+        "edit" => match rest.first().map(String::as_str) {
+            Some("-h" | "--help") => Invocation::EditHelp,
+            _ => Invocation::Edit(rest.to_vec()),
+        },
         "completions" => match rest.first().map(String::as_str) {
             Some("-h" | "--help") => Invocation::CompletionsHelp,
             _ => Invocation::Completions(rest.to_vec()),
@@ -88,7 +111,7 @@ fn parse_invocation(args: &[String]) -> Invocation {
 
 /// The message for a command line that isn't understood.
 fn problem_message(problem: &Problem) -> String {
-    const COMMANDS: &str = "Commands: add, refresh, search, completions. Run `godspeed-cli --help` for usage.";
+    const COMMANDS: &str = "Commands: add, edit, lists, labels, refresh, search, completions. Run `godspeed-cli --help` for usage.";
     match problem {
         Problem::NoCommand => format!("Error: no command given.\n{COMMANDS}"),
         Problem::Unknown(word) if word.starts_with('-') => {
@@ -106,8 +129,41 @@ fn print_help(page: &str) {
     print!("godspeed-cli {}\n{}", env!("CARGO_PKG_VERSION"), help::render(page, help::terminal_width()));
 }
 
+/// Takes `--debug` out of the arguments and turns debugging on if it was there. It can come
+/// before the command or anywhere after it, except that for `add` it only counts straight after
+/// the command (like `--json`), so a task can contain the word, and that after `--` it is text.
+fn take_debug(args: Vec<String>) -> Vec<String> {
+    let mut found = false;
+    let mut kept: Vec<String> = Vec::new();
+    let mut iter = args.into_iter().peekable();
+    while iter.peek().is_some_and(|arg| arg == "--debug") {
+        found = true;
+        iter.next();
+    }
+    let command = iter.next();
+    let only_leading = command.as_deref() == Some("add");
+    let mut scanning = true;
+    for arg in iter {
+        if scanning && arg == "--debug" {
+            found = true;
+            continue;
+        }
+        if arg == "--" || (only_leading && arg != "--json") {
+            scanning = false;
+        }
+        kept.push(arg);
+    }
+    if found {
+        debug::enable();
+    }
+    command.into_iter().chain(kept).collect()
+}
+
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let args = take_debug(env::args().skip(1).collect());
+    debug!("godspeed-cli {} on {} {}", env!("CARGO_PKG_VERSION"), env::consts::OS, env::consts::ARCH);
+    debug!("arguments: {args:?}");
+    debug!("data directory: {}", paths::data_home().display());
     match parse_invocation(&args) {
         Invocation::Help => {
             print_help(help::HELP);
@@ -121,6 +177,21 @@ fn main() -> ExitCode {
         Invocation::AddJson(task_args) => capture::run_add(&task_args, true),
         Invocation::Refresh(refresh_args) => refresh::run_refresh(&refresh_args),
         Invocation::Search(search_args) => search::run_search(&search_args),
+        Invocation::Lists(list_args) => listing::run(listing::Kind::Lists, &list_args),
+        Invocation::Labels(label_args) => listing::run(listing::Kind::Labels, &label_args),
+        Invocation::Edit(edit_args) => edit::run_edit(&edit_args),
+        Invocation::ListsHelp => {
+            print_help(help::LISTS_HELP);
+            exit::SUCCESS
+        }
+        Invocation::LabelsHelp => {
+            print_help(help::LABELS_HELP);
+            exit::SUCCESS
+        }
+        Invocation::EditHelp => {
+            print_help(help::EDIT_HELP);
+            exit::SUCCESS
+        }
         Invocation::AddHelp => {
             print_help(help::ADD_HELP);
             exit::SUCCESS
@@ -308,7 +379,7 @@ mod tests {
     fn the_error_for_an_unknown_command_names_it_and_shows_how_to_create_a_task() {
         let message = problem_message(&Problem::Unknown("string".to_string()));
         assert!(message.contains("'string' isn't a valid godspeed-cli command"), "{message}");
-        assert!(message.contains("add, refresh, search, completions"), "{message}");
+        assert!(message.contains("add, edit, lists, labels, refresh, search, completions"), "{message}");
         assert!(message.contains("godspeed-cli add \"string\""), "{message}");
     }
 
@@ -322,6 +393,6 @@ mod tests {
     #[test]
     fn the_error_for_no_command_lists_the_commands() {
         let message = problem_message(&Problem::NoCommand);
-        assert!(message.contains("no command given") && message.contains("add, refresh, search, completions"), "{message}");
+        assert!(message.contains("no command given") && message.contains("add, edit, lists, labels, refresh, search, completions"), "{message}");
     }
 }

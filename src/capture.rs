@@ -35,9 +35,11 @@ fn resolve_names(
     if let Some(list_name) = list_names.first() {
         let mut lists_cache = names::load(&paths::lists_path());
 
+        debug!("looking for the list '{list_name}' among {} cached list names", lists_cache.len());
         if let Some(list_id) = find_list_key(&lists_cache, list_name) {
             request.list_id = Some(list_id);
         } else {
+            debug!("'{list_name}' is not in the cached lists; fetching them");
             // Fetch lists from API
             lists_cache = api::fetch_lists(api_key)?;
             names::save(&paths::lists_path(), &lists_cache)?;
@@ -57,6 +59,7 @@ fn resolve_names(
         }
 
         for label_name in label_names {
+            debug!("looking for the label '{label_name}'");
             if let Some(label_id) = find_matching_key(&labels_cache, label_name) {
                 request.label_ids.push(label_id);
             }
@@ -80,6 +83,7 @@ pub fn process_task(task_str: &str, api_key: &str) -> Result<Value, TaskError> {
         return Err(TaskError::Invalid("The task has no title".to_string()));
     }
 
+    debug!("parsed task: title {:?}, list names {list_names:?}, label names {label_names:?}", request.title);
     resolve_names(&mut request, &list_names, &label_names, api_key).map_err(TaskError::Failed)?;
     api::send_task(&request, api_key).map_err(TaskError::Failed)
 }

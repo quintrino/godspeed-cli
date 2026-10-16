@@ -194,6 +194,7 @@ fn high_water(snapshot: &Snapshot, previous: Option<&str>) -> Option<String> {
         .map(|(_, raw)| raw.to_string())
 }
 
+#[derive(Debug)]
 pub struct Options {
     /// Rebuild the copy from scratch.
     pub full: bool,
@@ -228,6 +229,7 @@ pub fn perform_with(
     let facts = store.facts()?;
     let mode = plan(options.full, options.include_completed, &facts, options.full_refresh_after, now);
     let refreshed_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    debug!("refresh: facts {facts:?}, options {options:?}, mode {mode:?}");
 
     match mode {
         Mode::Full(reason) => {

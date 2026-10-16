@@ -1,6 +1,7 @@
 //! Putting search results in order, grouping them, applying `limit:`, and printing them as a
 //! fixed-width table or as JSON.
 
+use crate::color::{HEADER, MAGENTA, RED, RESET, YELLOW};
 use crate::eval::{Context, DueStatus, Named};
 use crate::query::{DateField, GroupField, GroupSpec, NumField, Query, SortField, SortSpec};
 use crate::store::StoredTask;
@@ -229,13 +230,6 @@ fn row_cells(task: &StoredTask, ctx: &Context) -> [String; 4] {
     ]
 }
 
-/// ANSI escape codes: red, yellow, magenta and bold cyan text, and going back to normal.
-const RED: &str = "\x1b[31m";
-const YELLOW: &str = "\x1b[33m";
-const MAGENTA: &str = "\x1b[35m";
-const HEADER: &str = "\x1b[1;36m";
-const RESET: &str = "\x1b[0m";
-
 /// The columns of the table that are coloured.
 const LIST_COLUMN: usize = 1;
 const DUE_COLUMN: usize = 2;
@@ -251,6 +245,11 @@ const PLAIN: Styles = [None; 4];
 /// added after the cell is cut, and the padding is worked out from the text without them, so
 /// they can't change how the columns line up. An empty cell gets no codes.
 fn format_line(cells: &[String; 4], styles: &Styles) -> String {
+    format_padded(cells, styles).trim_end().to_string()
+}
+
+/// [`format_line`] with the last column left padded, so that another column can follow it.
+fn format_padded(cells: &[String; 4], styles: &Styles) -> String {
     let line: Vec<String> = cells
         .iter()
         .zip(WIDTHS)
@@ -264,13 +263,27 @@ fn format_line(cells: &[String; 4], styles: &Styles) -> String {
             }
         })
         .collect();
-    line.join("  ").trim_end().to_string()
+    line.join("  ")
+}
+
+/// A line of the table with the task id after the other columns, if `id` is given.
+fn with_id(cells: &[String; 4], styles: &Styles, id: Option<&str>) -> String {
+    match id {
+        Some(id) => format!("{}  {id}", format_padded(cells, styles)).trim_end().to_string(),
+        None => format_line(cells, styles),
+    }
 }
 
 /// The column labels. With `color` they are bold cyan, so they stand apart from the rows (and
 /// from the red of an overdue date).
+#[cfg(test)]
 fn header_line(color: bool) -> String {
-    let line = format_line(&["TITLE", "LIST", "DUE", "LABELS"].map(String::from), &PLAIN);
+    header_line_with(color, false)
+}
+
+fn header_line_with(color: bool, show_id: bool) -> String {
+    let cells = ["TITLE", "LIST", "DUE", "LABELS"].map(String::from);
+    let line = with_id(&cells, &PLAIN, show_id.then_some("ID"));
     if color { format!("{HEADER}{line}{RESET}") } else { line }
 }
 
@@ -291,8 +304,14 @@ fn row_styles(task: &StoredTask, ctx: &Context, color: bool) -> Styles {
 }
 
 /// The rows of the table, coloured if `color` (see [`row_styles`]).
-fn table_rows(tasks: &[&StoredTask], ctx: &Context, color: bool) -> Vec<String> {
-    tasks.iter().map(|task| format_line(&row_cells(task, ctx), &row_styles(task, ctx, color))).collect()
+fn table_rows(tasks: &[&StoredTask], ctx: &Context, color: bool, show_id: bool) -> Vec<String> {
+    tasks
+        .iter()
+        .map(|task| {
+            let id = task.json.get("id").and_then(Value::as_str).unwrap_or("");
+            with_id(&row_cells(task, ctx), &row_styles(task, ctx, color), show_id.then_some(id))
+        })
+        .collect()
 }
 
 fn task_json(task: &StoredTask, ctx: &Context) -> Value {
@@ -327,7 +346,21 @@ fn limit_groups(groups: &mut Vec<Group<'_>>, limit: usize) {
 ///
 /// With `color`, the table is coloured: the header bold cyan, the list yellow, and the due date
 /// red if the task is overdue or magenta if it is due today. JSON is never coloured.
-pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: bool, color: bool) -> String {
+#[cfg(test)]
+pub fn render(query: &Query, tasks: Vec<&StoredTask>, ctx: &Context, json: bool, color: bool) -> String {
+    render_with(query, tasks, ctx, json, color, false)
+}
+
+/// [`render`], and with `show_id` the table has a last column with each task's id. (JSON always
+/// has the id.)
+pub fn render_with(
+    query: &Query,
+    mut tasks: Vec<&StoredTask>,
+    ctx: &Context,
+    json: bool,
+    color: bool,
+    show_id: bool,
+) -> String {
     sort_tasks(&mut tasks, &query.sorts, ctx);
 
     let mut groups = query.group.as_ref().map(|spec| group_tasks(&tasks, spec, query.duplicates, ctx));
@@ -357,17 +390,17 @@ pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: b
                 .iter()
                 .map(|g| {
                     let mut lines = vec![format!("{} ({})", g.name, g.tasks.len())];
-                    lines.extend(table_rows(&g.tasks, ctx, color));
+                    lines.extend(table_rows(&g.tasks, ctx, color, show_id));
                     lines.join("\n")
                 })
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            format!("{}\n{body}", header_line(color))
+            format!("{}\n{body}", header_line_with(color, show_id))
         }
         None if tasks.is_empty() => String::new(),
         None => {
-            let mut lines = vec![header_line(color)];
-            lines.extend(table_rows(&tasks, ctx, color));
+            let mut lines = vec![header_line_with(color, show_id)];
+            lines.extend(table_rows(&tasks, ctx, color, show_id));
             lines.join("\n")
         }
     }
