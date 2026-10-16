@@ -3,7 +3,7 @@
 # "## VERSION" (which may go on with ": date" or " (date)") up to the next "## " heading, without
 # the blank lines at either end. "###" sub-headings are part of the notes.
 #
-#   scripts/release-notes.sh 0.11.0 [CHANGELOG.md]
+#   bash scripts/release-notes.sh 0.11.0 [CHANGELOG.md]
 #
 # Exits with status 1, printing nothing, if the changelog has no heading for the version or the
 # section under it is empty. Exits with status 2 if it is run without a version.

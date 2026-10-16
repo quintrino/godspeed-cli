@@ -633,6 +633,6 @@ echo "Research new framework
 cargo test
 ```
 
-Release notes: each GitHub release uses the section of `CHANGELOG.md` under the heading `## X.Y.Z` for the version in `Cargo.toml` (the text after the version, such as `: 2026-10-16`, is ignored). So before bumping the version, add its section to the top of the changelog; a test fails if the current version has none. If a release is somehow made without one, it falls back to the notes GitHub generates from the commits and the workflow log says so. `scripts/release-notes.sh 0.11.0` prints what a release would use.
+Release notes: each GitHub release uses the section of `CHANGELOG.md` under the heading `## X.Y.Z` for the version in `Cargo.toml` (the text after the version, such as `: 2026-10-16`, is ignored). So before bumping the version, add its section to the top of the changelog; a test fails if the current version has none. If a release is somehow made without one, it falls back to the notes GitHub generates from the commits and the workflow log says so. `bash scripts/release-notes.sh 0.11.0` prints what a release would use.
 
 The unit tests cover the parsing. `tests/cli.rs` runs the real binary against a mock API on localhost, with its own data directory, by setting `GODSPEED_API_URL` (default `https://api.godspeedapp.com`). The token is sent to whatever that variable names, so leave it unset in normal use.
