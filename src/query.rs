@@ -8,6 +8,7 @@
 
 use crate::dates::{self, Kind};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cmp {
@@ -161,8 +162,87 @@ const SORT_FIELDS: &str =
     "title, list, label, due, first-due, snoozed, start, created, modified, duration, snooze-count, indent-level";
 const GROUP_FIELDS: &str = "list, label, label-group, due, first-due, snoozed, start, due-or-start, created";
 
+/// Parses a query with no saved searches: `@name` is an ordinary word.
+#[cfg(test)]
 pub fn parse(args: &[String], now: NaiveDateTime) -> Result<Query, String> {
-    let tokens = tokenize(&args.join(" "))?;
+    parse_with(args, now, None)
+}
+
+/// Parses a query. With `saved` (name -> query text), a word `@name` is replaced by that saved
+/// query, in parentheses so it keeps its own meaning (`@a | @b`, `-@a`); a saved search
+/// can use others. A name that isn't saved is an error.
+pub fn parse_with(args: &[String], now: NaiveDateTime, saved: Option<&BTreeMap<String, String>>) -> Result<Query, String> {
+    let mut tokens = tokenize(&args.join(" "))?;
+    if let Some(saved) = saved {
+        tokens = expand(tokens, saved, now, &mut Vec::new())?;
+    }
+    build(tokens, now)
+}
+
+/// How deep saved searches may refer to each other.
+const MAX_SAVED_DEPTH: usize = 8;
+
+/// The name in a word like `@overdue`, if it is one.
+fn saved_name(atom: &str) -> Option<&str> {
+    let name = atom.strip_prefix('@')?;
+    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')).then_some(name)
+}
+
+/// Whether the atom is `sort:`, `group:`, `limit:`, `enable:` or `disable:`, which say how to
+/// show the results and not which tasks to pick.
+fn is_presentation(atom: &str) -> bool {
+    ["sort:", "sort-asc:", "sort-desc:", "group:", "limit:", "enable:", "disable:"].iter().any(|prefix| atom.starts_with(prefix))
+}
+
+/// Replaces every `@name` among the tokens by the tokens of the saved search, checking each
+/// saved search on its own so that a mistake in one is reported as being in it. `trail` is the
+/// searches being expanded, to catch one that leads back to itself.
+fn expand(
+    tokens: Vec<Token>,
+    saved: &BTreeMap<String, String>,
+    now: NaiveDateTime,
+    trail: &mut Vec<String>,
+) -> Result<Vec<Token>, String> {
+    let mut out = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        let name = match &token {
+            Token::Atom(atom) => saved_name(atom).map(str::to_string),
+            _ => None,
+        };
+        let Some(name) = name else {
+            out.push(token);
+            continue;
+        };
+        let text = saved.get(&name).ok_or_else(|| {
+            let names: Vec<&str> = saved.keys().map(String::as_str).collect();
+            format!("No saved search '{name}' (saved searches: {})", names.join(", "))
+        })?;
+        if trail.contains(&name) {
+            return Err(format!("Saved searches lead back to themselves: {} -> {name}", trail.join(" -> ")));
+        }
+        if trail.len() >= MAX_SAVED_DEPTH {
+            return Err(format!("Saved searches are nested more than {MAX_SAVED_DEPTH} deep, at '{name}'"));
+        }
+        debug!("saved search : {text}");
+        trail.push(name.clone());
+        let inner = tokenize(text).map_err(|e| format!("In saved search '{name}': {e}"))?;
+        let inner = expand(inner, saved, now, trail).map_err(|e| if e.contains("saved search '") { e } else { format!("In saved search '{name}': {e}") })?;
+        trail.pop();
+        // Checked by itself, so the error says which saved search it is in.
+        build(inner.clone(), now).map_err(|e| format!("In saved search '{name}': {e}"))?;
+        if inner.iter().any(|token| !matches!(token, Token::Atom(atom) if is_presentation(atom))) {
+            out.push(Token::LParen);
+            out.extend(inner);
+            out.push(Token::RParen);
+        } else {
+            out.extend(inner);
+        }
+    }
+    Ok(out)
+}
+
+/// Builds the query from its tokens.
+fn build(tokens: Vec<Token>, now: NaiveDateTime) -> Result<Query, String> {
     let mut query = Query {
         expr: Expr::All,
         include_completed: false,
@@ -1025,5 +1105,118 @@ mod tests {
     fn arguments_are_joined_with_spaces() {
         let query = parse(&["label:Low".to_string(), "due<=3d".to_string()], now()).unwrap();
         assert!(matches!(query.expr, Expr::And(..)));
+    }
+}
+
+#[cfg(test)]
+mod saved_tests {
+    use super::*;
+
+    fn now() -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 10, 15).unwrap().and_hms_opt(10, 30, 0).unwrap()
+    }
+
+    fn saved(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(name, text)| (name.to_string(), text.to_string())).collect()
+    }
+
+    fn with(saved_searches: &[(&str, &str)], query: &str) -> Result<Query, String> {
+        parse_with(&[query.to_string()], now(), Some(&saved(saved_searches)))
+    }
+
+    /// The same query written out, for comparing what a saved search comes to.
+    fn plain(query: &str) -> Query {
+        parse(&[query.to_string()], now()).unwrap()
+    }
+
+    #[test]
+    fn a_saved_search_stands_for_its_query_and_more_words_are_added_to_it() {
+        let searches = [("overdue", "due<today sort:due")];
+        let direct = with(&searches, "@overdue").unwrap();
+        let spelled = plain("(due<today) sort:due");
+        assert_eq!(direct.expr, spelled.expr);
+        assert_eq!(direct.sorts.len(), 1);
+
+        let more = with(&searches, "@overdue label:Low limit:5").unwrap();
+        assert_eq!(more.expr, plain("(due<today) label:Low").expr);
+        assert_eq!(more.limit, Some(5));
+        assert_eq!(more.sorts.len(), 1, "the saved sort stays");
+    }
+
+    #[test]
+    fn a_saved_search_keeps_its_own_meaning_inside_a_bigger_query() {
+        let searches = [("either", "milk | bread"), ("not-tea", "!tea")];
+        assert_eq!(with(&searches, "@either urgent").unwrap().expr, plain("(milk | bread) urgent").expr);
+        assert_eq!(with(&searches, "-@either").unwrap().expr, plain("-(milk | bread)").expr);
+        assert_eq!(with(&searches, "@either | @not-tea").unwrap().expr, plain("(milk | bread) | (!tea)").expr);
+    }
+
+    #[test]
+    fn a_saved_search_that_is_only_presentation_adds_no_empty_parentheses() {
+        let searches = [("newest", "sort-desc:created limit:3")];
+        let query = with(&searches, "@newest milk").unwrap();
+        assert_eq!(query.expr, plain("milk").expr);
+        assert_eq!(query.limit, Some(3));
+        let alone = with(&searches, "@newest").unwrap();
+        assert_eq!(alone.expr, Expr::All);
+    }
+
+    #[test]
+    fn completed_tasks_are_only_included_when_the_query_says_is_complete() {
+        let searches = [("late", "due<today"), ("done", "is:complete")];
+        assert!(!with(&searches, "@late").unwrap().include_completed);
+        assert!(with(&searches, "@late is:complete").unwrap().include_completed);
+        assert!(with(&searches, "@done @late").unwrap().include_completed, "a saved search can ask for them");
+    }
+
+    #[test]
+    fn saved_searches_can_use_each_other() {
+        let searches = [("a", "milk"), ("b", "@a & urgent"), ("c", "@b | tea")];
+        assert_eq!(with(&searches, "@c").unwrap().expr, plain("(((milk) & urgent) | tea)").expr);
+    }
+
+    #[test]
+    fn a_search_that_leads_back_to_itself_is_an_error_and_so_is_one_nested_too_deep() {
+        let looping = [("a", "@b"), ("b", "@a")];
+        let message = with(&looping, "@a").unwrap_err();
+        assert!(message.contains("lead back to themselves") && message.contains("a -> b -> a"), "{message}");
+        assert!(with(&[("a", "@a")], "@a").unwrap_err().contains("lead back"));
+
+        let names: Vec<String> = (0..10).map(|i| format!("s{i}")).collect();
+        let owned: Vec<(String, String)> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), if i + 1 < names.len() { format!("@{}", names[i + 1]) } else { "milk".to_string() }))
+            .collect();
+        let pairs: Vec<(&str, &str)> = owned.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        assert!(with(&pairs, "@s0").unwrap_err().contains("nested more than"));
+    }
+
+    #[test]
+    fn an_unknown_name_is_an_error_that_lists_the_saved_searches() {
+        let message = with(&[("today", "due:today"), ("inbox", "list:Inbox")], "@nothing").unwrap_err();
+        assert!(message.contains("No saved search 'nothing'") && message.contains("inbox, today"), "{message}");
+    }
+
+    #[test]
+    fn a_mistake_in_a_saved_search_says_which_one() {
+        let message = with(&[("bad", "milk sort:colour")], "@bad").unwrap_err();
+        assert!(message.starts_with("In saved search 'bad':") && message.contains("Unknown sort field 'colour'"), "{message}");
+        let message = with(&[("bad", "milk & (tea")], "@bad").unwrap_err();
+        assert!(message.starts_with("In saved search 'bad':"), "{message}");
+        let message = with(&[("outer", "@inner"), ("inner", "\"unclosed")], "@outer").unwrap_err();
+        assert!(message.contains("saved search 'inner'") || message.contains("saved search 'outer'"), "{message}");
+    }
+
+    #[test]
+    fn without_saved_searches_an_at_word_is_just_a_word_and_a_quoted_one_always_is() {
+        assert_eq!(plain("@home").expr, parse_with(&["@home".to_string()], now(), None).unwrap().expr);
+        let quoted = with(&[("home", "list:Home")], "\"@home\"").unwrap();
+        assert_eq!(quoted.expr, plain("\"@home\"").expr);
+        assert_eq!(saved_name("@home"), Some("home"));
+        assert_eq!(saved_name("@"), None);
+        assert_eq!(saved_name("@a b"), None);
+        assert_eq!(saved_name("@a:b"), None);
+        assert_eq!(saved_name("home"), None);
     }
 }

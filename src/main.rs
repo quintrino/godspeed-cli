@@ -2,6 +2,7 @@
 mod debug;
 mod api;
 mod color;
+mod commands;
 mod capture;
 mod completions;
 mod config;
@@ -21,6 +22,7 @@ mod queue_cmd;
 mod query;
 mod refresh;
 mod search;
+mod searches;
 mod show;
 mod store;
 mod task;
@@ -45,6 +47,7 @@ enum Invocation {
     Edit(Vec<String>),
     Show(Vec<String>),
     Queue(Vec<String>),
+    Searches(Vec<String>),
     AddHelp,
     RefreshHelp,
     SearchHelp,
@@ -53,6 +56,7 @@ enum Invocation {
     EditHelp,
     ShowHelp,
     QueueHelp,
+    SearchesHelp,
     Completions(Vec<String>),
     CompletionsHelp,
     /// The hidden command the completion scripts call for names: `__complete lists|labels`.
@@ -109,6 +113,10 @@ fn parse_invocation(args: &[String]) -> Invocation {
             Some("-h" | "--help") => Invocation::QueueHelp,
             _ => Invocation::Queue(rest.to_vec()),
         },
+        "searches" => match rest.first().map(String::as_str) {
+            Some("-h" | "--help") => Invocation::SearchesHelp,
+            _ => Invocation::Searches(rest.to_vec()),
+        },
         "completions" => match rest.first().map(String::as_str) {
             Some("-h" | "--help") => Invocation::CompletionsHelp,
             _ => Invocation::Completions(rest.to_vec()),
@@ -120,14 +128,17 @@ fn parse_invocation(args: &[String]) -> Invocation {
 
 /// The message for a command line that isn't understood.
 fn problem_message(problem: &Problem) -> String {
-    const COMMANDS: &str = "Commands: add, edit, show, queue, lists, labels, refresh, search, completions. Run `godspeed-cli --help` for usage.";
+    let commands = format!(
+        "Commands: {}. Run `godspeed-cli --help` for usage. A saved search is run by its name (see `godspeed-cli searches`).",
+        commands::list()
+    );
     match problem {
-        Problem::NoCommand => format!("Error: no command given.\n{COMMANDS}"),
+        Problem::NoCommand => format!("Error: no command given.\n{commands}"),
         Problem::Unknown(word) if word.starts_with('-') => {
-            format!("Error: '{word}' isn't a valid godspeed-cli option.\n{COMMANDS}")
+            format!("Error: '{word}' isn't a valid godspeed-cli option.\n{commands}")
         }
         Problem::Unknown(word) => format!(
-            "Error: '{word}' isn't a valid godspeed-cli command.\n{COMMANDS}\n\
+            "Error: '{word}' isn't a valid godspeed-cli command.\n{commands}\n\
              To create a task, use add: godspeed-cli add \"{word}\""
         ),
     }
@@ -180,6 +191,36 @@ fn take_debug(args: Vec<String>) -> Vec<String> {
         debug::enable();
     }
     command.into_iter().chain(kept).collect()
+}
+
+/// An unknown first word is a saved search if one has that name: it is run as `search @name`
+/// with the rest of the arguments. Otherwise it is an error, as it always was, so a typo or a
+/// sentence can never become a task or do anything else by accident.
+fn run_saved_or_report(problem: &Problem, args: &[String]) -> ExitCode {
+    if let Problem::Unknown(word) = problem {
+        if !word.starts_with('-') {
+            match searches::saved_command(word) {
+                Ok(Some((name, query))) => {
+                    let rest = &args[1..];
+                    if matches!(rest.first().map(String::as_str), Some("-h" | "--help")) {
+                        print!("{}", searches::help_for(&name, &query));
+                        return exit::SUCCESS;
+                    }
+                    debug!("'{word}' is the saved search '{name}': {query}");
+                    let mut search_args = vec![format!("@{name}")];
+                    search_args.extend(rest.iter().cloned());
+                    return search::run_search(&search_args);
+                }
+                Ok(None) => {}
+                Err(message) => {
+                    eprintln!("Error: '{word}' isn't a command, and the settings file has a problem: {message}");
+                    return exit::usage();
+                }
+            }
+        }
+    }
+    eprintln!("{}", problem_message(problem));
+    exit::usage()
 }
 
 fn main() -> ExitCode {
@@ -241,11 +282,13 @@ fn main() -> ExitCode {
             print_help(help::COMPLETIONS_HELP);
             exit::SUCCESS
         }
-        Invocation::Names(names_args) => completions::run_names(&names_args),
-        Invocation::Invalid(problem) => {
-            eprintln!("{}", problem_message(&problem));
-            exit::usage()
+        Invocation::Searches(searches_args) => searches::run(&searches_args),
+        Invocation::SearchesHelp => {
+            print_help(help::SEARCHES_HELP);
+            exit::SUCCESS
         }
+        Invocation::Names(names_args) => completions::run_names(&names_args),
+        Invocation::Invalid(problem) => run_saved_or_report(&problem, &args),
     }
 }
 
@@ -292,13 +335,27 @@ mod tests {
     }
 
     #[test]
+    fn every_command_in_the_list_of_commands_is_recognised_and_nothing_else_is() {
+        // The list is what saved searches may not be named after, so a command that is missing
+        // from it could be hidden by a saved search. Adding a command means adding its word there.
+        for word in commands::COMMANDS {
+            assert!(!matches!(parse_invocation(&args(&[word])), Invocation::Invalid(_)), "{word} is listed but not recognised");
+        }
+        for word in commands::RESERVED {
+            assert!(matches!(parse_invocation(&args(&[word])), Invocation::Invalid(_)), "{word} is kept free, so it must not be a command yet: move it to COMMANDS");
+        }
+        assert!(matches!(parse_invocation(&args(&["__complete", "lists"])), Invocation::Names(_)), "the hidden command is not listed");
+        assert!(commands::is_reserved("search") && !commands::COMMANDS.contains(&"__complete"));
+    }
+
+    #[test]
     fn no_arguments_at_all_is_an_error_too() {
         assert_eq!(parse_invocation(&args(&[])), Invocation::Invalid(Problem::NoCommand));
     }
 
     #[test]
     fn commands_are_recognised_exactly() {
-        for word in ["Search", "ADD", "Refresh", "refreshing", "adding", "searches", "completion", "Completions"] {
+        for word in ["Search", "ADD", "Refresh", "refreshing", "adding", "searchess", "completion", "Completions"] {
             assert_eq!(parse_invocation(&args(&[word, "x"])), unknown(word), "{word}");
         }
         // Only the first argument is the command.
@@ -392,7 +449,7 @@ mod tests {
     fn the_error_for_an_unknown_command_names_it_and_shows_how_to_create_a_task() {
         let message = problem_message(&Problem::Unknown("string".to_string()));
         assert!(message.contains("'string' isn't a valid godspeed-cli command"), "{message}");
-        assert!(message.contains("add, edit, show, queue, lists, labels, refresh, search, completions"), "{message}");
+        assert!(message.contains("add, edit, show, queue, lists, labels, refresh, search, searches, completions"), "{message}");
         assert!(message.contains("godspeed-cli add \"string\""), "{message}");
     }
 
@@ -406,6 +463,6 @@ mod tests {
     #[test]
     fn the_error_for_no_command_lists_the_commands() {
         let message = problem_message(&Problem::NoCommand);
-        assert!(message.contains("no command given") && message.contains("add, edit, show, queue, lists, labels, refresh, search, completions"), "{message}");
+        assert!(message.contains("no command given") && message.contains("add, edit, show, queue, lists, labels, refresh, search, searches, completions"), "{message}");
     }
 }

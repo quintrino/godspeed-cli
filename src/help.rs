@@ -215,6 +215,8 @@ Create tasks in Godspeed, and search them, from the command line.
 > godspeed-cli edit [--interactive] [--dry-run] [OPTIONS] <ID | WORDS>...
 > godspeed-cli show [--json] <ID | WORDS>...
 > godspeed-cli queue [--json | --count] | retry | drop <NUMBER>... | drop --all
+> godspeed-cli searches [list | show NAME | add NAME QUERY... | remove NAME]
+> godspeed-cli <SAVED SEARCH> [SEARCH OPTIONS] [MORE SEARCH WORDS]...
 > godspeed-cli lists [--id | --ids-only | --count] [--json] [STRING]...
 > godspeed-cli labels [--id | --ids-only | --count] [--json] [STRING]...
 > godspeed-cli refresh [--full] [--include-completed] [--json]
@@ -228,6 +230,7 @@ Create tasks in Godspeed, and search them, from the command line.
 - edit => Change a task: edit it, complete it, snooze it, delete it or move it to another list, by its id. `godspeed-cli edit --help` has the details.
 - show => Show everything the local copy knows about one task, by id or title words. `godspeed-cli show --help` has the details.
 - queue => Show what is waiting to be sent after a failure (tasks from `add`, changes from `edit`), send it now with `queue retry`, or throw it away with `queue drop`. `godspeed-cli queue --help` has the details.
+- searches => Give a search a name, and run it by that name: `godspeed-cli inbox`. `today` and `overdue` are built in. `godspeed-cli searches --help` has the details.
 - lists => Show your lists, or only those matching a string. --id shows their ids.
 - labels => Show your labels, or only those matching a string. --id shows their ids.
 - refresh => Keep a local copy of your tasks, lists and labels, for searching. The first refresh downloads everything; after that only what changed is fetched, which is quick. --full rebuilds the copy from scratch. `godspeed-cli refresh --help` has the details.
@@ -257,6 +260,7 @@ $XDG_CONFIG_HOME/godspeed-cli/config.toml (usually ~/.config/godspeed-cli/config
 - max_age => `search` refreshes first when the copy is older than this. Default: not set, so search only reads the copy.
 - include_completed => true makes `refresh` keep completed tasks too. Default: false.
 - full_refresh_after => A refresh is a full one when the last full refresh is this old. Default: "7d".
+- [searches] => Saved searches, one `name = "query"` line each, run with `godspeed-cli name`. Kept up to date by `godspeed-cli searches add` and `remove`.
 
 > max_age = "12h"
 > include_completed = true
@@ -425,6 +429,10 @@ By default only incomplete tasks are searched. is:complete (not part of Godspeed
 > godspeed-cli search 'snoozed>="Oct 14th 12am" & snoozed<="Oct 14th 1159pm"'
 > godspeed-cli search 'due:today group:list sort:due'
 > godspeed-cli search 'duration>="1 hour and 30 minutes" has:notes limit:10'
+> godspeed-cli search  label:Low
+
+## SAVED SEARCHES
+A word like  is replaced by the saved search with that name, in parentheses, and the other words are added to it. `today` and `overdue` are built in, and `godspeed-cli searches` makes and lists the others. A name that isn't saved is an error, so to search for a title that really contains , quote it: '"@something"'. The saved search can be run as a command: `godspeed-cli overdue --json` is the same as `godspeed-cli search @overdue --json`.
 
 ## MATCHING
 - word => Ignores case and word order; found in the title, notes or attachment names
@@ -675,6 +683,58 @@ A dropped change was already shown in the local copy when it was queued, so the 
 - 2 => The input can't be used: an unknown command, a number that isn't in the queue, or no token for `retry`.
 "#;
 
+pub const SEARCHES_HELP: &str = r#"
+Give a search a name, and run it by that name.
+
+## USAGE
+> godspeed-cli <NAME> [SEARCH OPTIONS] [MORE SEARCH WORDS]...
+> godspeed-cli search @<NAME> [MORE SEARCH WORDS]...
+> godspeed-cli searches [list] [--json | --count]
+> godspeed-cli searches show <NAME>
+> godspeed-cli searches add <NAME> <QUERY>...
+> godspeed-cli searches remove <NAME>
+
+## EXAMPLES
+> godspeed-cli searches add inbox 'list:Inbox sort-desc:created'
+> godspeed-cli inbox
+> godspeed-cli inbox label:Low --json
+> godspeed-cli overdue --ids-only | godspeed-cli edit --snooze tomorrow
+> godspeed-cli today --count
+
+## RUNNING ONE
+A saved search is run by its name, as if it were a command: `godspeed-cli inbox` is the same as `godspeed-cli search @inbox`. It takes all the options of `godspeed-cli search` (--json, --id, --ids-only, --count, --refresh, --max-age, --color), and any words after the name are added to the query, so `godspeed-cli inbox label:Low` finds the tasks in the Inbox with the label Low. The saved query is put in parentheses first, so `a | b` in a saved search stays together. A saved search can use others with @name, to a depth of eight; one that leads back to itself is an error. `godspeed-cli <NAME> --help` shows what it runs.
+
+Only a name that you have saved, or one of the built-in ones, is run. Anything else that isn't a command is still an error, so a typo can never create a task.
+
+## BUILT-IN SEARCHES
+- today => due:today sort:due
+- overdue => due<today sort:due
+
+They don't say anything about completed tasks, because a search only shows incomplete tasks unless its query has is:complete. Replace one by saving your own with the same name (`godspeed-cli searches add today 'due:today list:Work'`); removing yours brings the built-in back.
+
+## COMMANDS
+- searches => List the saved searches, with where each comes from. --json prints them as JSON and --count prints how many there are.
+- searches show NAME => Print one.
+- searches add NAME QUERY... => Save a search, or replace one. The query is checked first, including any @name in it, and the settings file is changed only by adding the line to its [searches] table: everything else in it, comments included, is kept. If the file is laid out in a way that can't be edited safely, nothing is written and you are told to edit it by hand.
+- searches remove NAME => Take one out of the settings file.
+
+## NAMES
+A name is made of lowercase letters, digits, - and _, starts with a letter or a digit, and is at most 40 characters. It can't be the name of a godspeed-cli command (add, edit, show, queue, lists, labels, refresh, search, searches, completions), or of a word kept for one (help, version, list, config, settings, delete), because the command would always win. If a settings file has a saved search with such a name, such as after an upgrade adds a command with that name, every command that reads the settings stops with an error that says which one and how to rename it. `godspeed-cli searches remove NAME` works even then, and so does editing the file.
+
+## THE SETTINGS FILE
+They are kept in the [searches] table of $XDG_CONFIG_HOME/godspeed-cli/config.toml (usually ~/.config/godspeed-cli/config.toml), and can be written by hand:
+
+> [searches]
+> inbox = "list:Inbox sort:due"
+> waiting = "label:Waiting"
+> quick = "duration<=15m limit:10"
+
+## EXIT STATUS
+- 0 => Done. A search that finds nothing is still 0.
+- 1 => As for `search`: the local copy couldn't be read.
+- 2 => The input can't be used: an unusable name, a query that doesn't work, no such saved search, or a settings file with a mistake.
+"#;
+
 pub const COMPLETIONS_HELP: &str = r#"
 Print a shell completion script for godspeed-cli.
 
@@ -854,8 +914,8 @@ mod tests {
         assert_eq!(out, "intro text\n\nS:\n    body text\n");
     }
 
-    fn pages() -> [(&'static str, &'static str); 10] {
-        [("main", HELP), ("add", ADD_HELP), ("refresh", REFRESH_HELP), ("search", SEARCH_HELP), ("completions", COMPLETIONS_HELP), ("lists", LISTS_HELP), ("labels", LABELS_HELP), ("edit", EDIT_HELP), ("show", SHOW_HELP), ("queue", QUEUE_HELP)]
+    fn pages() -> [(&'static str, &'static str); 11] {
+        [("main", HELP), ("add", ADD_HELP), ("refresh", REFRESH_HELP), ("search", SEARCH_HELP), ("completions", COMPLETIONS_HELP), ("lists", LISTS_HELP), ("labels", LABELS_HELP), ("edit", EDIT_HELP), ("show", SHOW_HELP), ("queue", QUEUE_HELP), ("searches", SEARCHES_HELP)]
     }
 
     #[test]

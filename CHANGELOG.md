@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.16.0: 2026-10-16
+
+### Added
+
+- **Saved searches.** Give a search a name and run it by that name: `godspeed-cli searches add inbox 'list:Inbox sort-desc:created'`, then `godspeed-cli inbox`, or `godspeed-cli search @inbox`. More search words and every `search` option can follow (`godspeed-cli inbox label:Low --json`, `godspeed-cli overdue --ids-only | godspeed-cli edit --snooze tomorrow`). They are kept in a `[searches]` table in the settings file, which can be written by hand; `searches add` and `remove` change only that table's lines, keep the rest of the file, and write nothing if they can't be sure of the result.
+  - `@name` in a search is replaced by the saved query in parentheses, so `a | b` stays together and `-@name` works. A saved search can use others, up to eight deep; a loop is an error; a mistake in one says which (`In saved search 'inbox': Unknown sort field 'colour'`). `searches add` tries the query, and what it refers to, before saving it.
+  - **`today` (`due:today sort:due`) and `overdue` (`due<today sort:due`) are built in** and can be replaced by saving your own with the same name; removing yours brings the built-in back. Neither mentions completed tasks, which a search leaves out unless it says `is:complete`, so `godspeed-cli overdue is:complete` finds the completed ones.
+  - A name is lowercase letters, digits, `-` and `_` (up to 40), and isn't case-sensitive when run. `godspeed-cli NAME --help` shows what a saved search runs, and `godspeed-cli searches --help` is a new help page. `search --help` and the settings-file help describe `@name` and `[searches]`.
+  - `searches`, `searches show`, `searches add` and `searches remove`, with `--json` and `--count` on the list.
+- **A saved search can't be named like a command.** `searches add` refuses the name of any command, or of a word kept for one (`help`, `version`, `list`, `config`, `settings`, `delete`). If a settings file has such a name, such as after a later version adds a command, every command that reads the settings stops with an error that names the search and says to rename it; `searches remove` and editing the file still work, and `add` is unaffected. The commands are listed in one place, with a test that fails if a command is missing from the list.
+- **Tab completion** offers saved searches as commands and after `@`, via a new hidden `__complete searches`.
+
+### Changed
+
+- A first word that isn't a command is now looked up among the saved searches before it is an error. Anything not saved is still an error, so a typo still can't create a task, and the error now points to `godspeed-cli searches`.
+- **A word starting with `@` in a search is now a saved-search name.** A name that isn't saved is an error that lists the saved ones. To search for a title that really contains `@something`, quote it: `search '"@something"'`.
+- `search` reads the settings file before the query, so a mistake in either is reported as before but a mistake in the settings wins.
+
 ## 0.15.0: 2026-10-16
 
 ### Added

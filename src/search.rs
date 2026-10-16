@@ -8,7 +8,7 @@ use crate::config::{self, Age};
 use crate::eval::Context;
 use crate::refresh;
 use crate::store::{Facts, Store, StoredTask};
-use crate::{exit, paths, present, query, token};
+use crate::{exit, paths, present, query, searches, token};
 use chrono::{DateTime, Local, Utc};
 use serde_json::Value;
 use std::io::{self, Write};
@@ -150,15 +150,15 @@ pub fn run_search(args: &[String]) -> ExitCode {
         }
     };
     let now = Local::now().naive_local();
-    let query = match query::parse(&args.query, now) {
-        Ok(query) => query,
+    let config = match config::load() {
+        Ok(config) => config,
         Err(message) => {
             eprintln!("Error: {message}");
             return exit::usage();
         }
     };
-    let config = match config::load() {
-        Ok(config) => config,
+    let query = match query::parse_with(&args.query, now, Some(&searches::merged(&config.searches))) {
+        Ok(query) => query,
         Err(message) => {
             eprintln!("Error: {message}");
             return exit::usage();

@@ -15,6 +15,8 @@ use std::process::ExitCode;
 enum Kind {
     Lists,
     Labels,
+    /// The saved searches, including the built-in ones.
+    Searches,
 }
 
 impl Kind {
@@ -22,6 +24,7 @@ impl Kind {
         match word {
             "lists" => Some(Kind::Lists),
             "labels" => Some(Kind::Labels),
+            "searches" => Some(Kind::Searches),
             _ => None,
         }
     }
@@ -57,6 +60,9 @@ fn candidates<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
 /// The names from the local copy (as written), then from the lists and labels already used when
 /// creating tasks (kept lowercase), so that the copy's capitalisation wins.
 fn known_names(kind: Kind) -> Vec<String> {
+    if kind == Kind::Searches {
+        return crate::searches::names_lenient();
+    }
     let mut found: Vec<String> = Vec::new();
     let store_path = paths::store_path();
     if store_path.exists() {
@@ -64,6 +70,7 @@ fn known_names(kind: Kind) -> Vec<String> {
             let rows = match kind {
                 Kind::Lists => store.lists(),
                 Kind::Labels => store.labels(),
+                Kind::Searches => unreachable!("the saved searches are not in the local copy"),
             };
             if let Ok(rows) = rows {
                 found.extend(rows.iter().filter_map(|row| row.get("name")?.as_str().map(str::to_string)));
@@ -73,6 +80,7 @@ fn known_names(kind: Kind) -> Vec<String> {
     let cache = match kind {
         Kind::Lists => paths::lists_path(),
         Kind::Labels => paths::labels_path(),
+        Kind::Searches => unreachable!("the saved searches are not cached names"),
     };
     let mut cached: Vec<String> = names::load(&cache).into_keys().collect();
     cached.sort();
@@ -150,7 +158,7 @@ _godspeed_cli() {
     local line=${COMP_LINE:0:COMP_POINT} word lead rest kind= op= typed head
     COMPREPLY=()
     if [[ $COMP_CWORD -eq 1 ]]; then
-        COMPREPLY=($(compgen -W "add edit show queue lists labels refresh search completions --help --version" -- "$cur"))
+        COMPREPLY=($(compgen -W "add edit show queue lists labels refresh search searches completions --help --version $(godspeed-cli __complete searches 2>/dev/null)" -- "$cur"))
         return
     fi
     case $cmd in
@@ -160,6 +168,11 @@ _godspeed_cli() {
         queue) COMPREPLY=($(compgen -W "list retry drop --json --count --all --yes --debug" -- "$cur")); return ;;
         lists|labels) COMPREPLY=($(compgen -W "--id --ids-only --count --json --color --debug" -- "$cur")); return ;;
         completions) COMPREPLY=($(compgen -W "bash fish zsh" -- "$cur")); return ;;
+        searches)
+            case ${COMP_WORDS[COMP_CWORD-1]} in
+                show|remove) _godspeed_cli_names searches "$cur" ""; return ;;
+            esac
+            COMPREPLY=($(compgen -W "list show add remove --json --count" -- "$cur")); return ;;
         add) flags="--json --dry-run --each --due --duration --snooze --start --notes --list --label --complete --debug" ;;
         search) flags="--json --id --ids-only --count --refresh --max-age --color --debug" ;;
         *) return ;;
@@ -188,6 +201,7 @@ _godspeed_cli() {
             list:*) kind=lists; op=list: ;;
             in:*) kind=lists; op=in: ;;
             label:*) kind=labels; op=label: ;;
+            @*) kind=searches; op=@ ;;
         esac
     fi
     [[ -n $kind ]] || return
@@ -240,6 +254,8 @@ _godspeed_cli_words() {
             _godspeed_cli_names lists
         elif compset -P 'label:'; then
             _godspeed_cli_names labels
+        elif compset -P '@'; then
+            _godspeed_cli_names searches
         fi
     fi
 }
@@ -255,8 +271,13 @@ _godspeed_cli() {
         'labels:show your labels'
         'refresh:update the local copy of your tasks'
         'search:search the local copy'
+        'searches:name a search, and list or remove saved searches'
         'completions:print a shell completion script'
     )
+    local saved
+    for saved in ${(f)"$(godspeed-cli __complete searches 2>/dev/null)"}; do
+        commands+=("$saved:saved search")
+    done
     if (( CURRENT == 2 )); then
         _describe -t commands 'command' commands
         [[ $PREFIX == -* ]] && compadd -- --help --version
@@ -269,6 +290,11 @@ _godspeed_cli() {
         queue) compadd -- list retry drop --json --count --all --yes --debug ;;
         lists|labels) compadd -- --id --ids-only --count --json --color --debug ;;
         completions) compadd -- bash fish zsh ;;
+        searches)
+            case $words[CURRENT-1] in
+                show|remove) _godspeed_cli_names searches ;;
+                *) compadd -- list show add remove --json --count ;;
+            esac ;;
         add|search) _godspeed_cli_words ;;
     esac
 }
@@ -310,6 +336,9 @@ function __godspeed_cli_names
             case 'label:*'
                 set kind labels
                 set op label:
+            case '@*'
+                set kind searches
+                set op @
         end
     end
     test -n "$kind"; or return
@@ -327,6 +356,12 @@ complete -c godspeed-cli -n __fish_use_subcommand -a add -d 'Create a task'
 complete -c godspeed-cli -n __fish_use_subcommand -a edit -d 'Edit, complete, snooze, delete or move a task'
 complete -c godspeed-cli -n __fish_use_subcommand -a show -d 'Show everything about one task'
 complete -c godspeed-cli -n __fish_use_subcommand -a queue -d 'Show or send what is waiting to be sent'
+complete -c godspeed-cli -n __fish_use_subcommand -a searches -d 'Name a search, and list or remove saved searches'
+complete -c godspeed-cli -n __fish_use_subcommand -a '(godspeed-cli __complete searches 2>/dev/null)' -d 'Saved search'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from searches' -a 'list show add remove'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from searches' -l json -d 'Print JSON'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from searches' -l count -d 'Print only the count'
+complete -c godspeed-cli -n 'test (count (commandline -opc)) -ge 3; and test (commandline -opc)[2] = searches; and contains -- (commandline -opc)[3] show remove' -a '(godspeed-cli __complete searches 2>/dev/null)'
 complete -c godspeed-cli -n __fish_use_subcommand -a lists -d 'Show your lists'
 complete -c godspeed-cli -n __fish_use_subcommand -a labels -d 'Show your labels'
 complete -c godspeed-cli -n __fish_use_subcommand -a refresh -d 'Update the local copy of your tasks'

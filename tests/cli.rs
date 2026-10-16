@@ -1945,7 +1945,7 @@ fn a_bare_word_is_not_a_command_and_creates_nothing() {
     let message = stderr(&output);
     assert!(message.contains("'string' isn't a valid godspeed-cli command"), "{message}");
     assert!(message.contains("godspeed-cli add \"string\""), "{message}");
-    assert!(message.contains("add, edit, show, queue, lists, labels, refresh, search, completions"), "{message}");
+    assert!(message.contains("add, edit, show, queue, lists, labels, refresh, search, searches, completions"), "{message}");
     assert!(!message.contains("GODSPEED_TOKEN"), "it fails before looking at the token: {message}");
     assert!(api.requests().is_empty(), "nothing is sent, and the queue isn't retried");
     assert_eq!(sandbox.queued_tasks(), vec!["Queued earlier"]);
@@ -1982,7 +1982,7 @@ fn no_arguments_is_an_error_that_lists_the_commands() {
 
     assert_eq!(code(&output), 2);
     assert!(stderr(&output).contains("no command given"), "{}", stderr(&output));
-    assert!(stderr(&output).contains("add, edit, show, queue, lists, labels, refresh, search, completions"), "{}", stderr(&output));
+    assert!(stderr(&output).contains("add, edit, show, queue, lists, labels, refresh, search, searches, completions"), "{}", stderr(&output));
     assert!(stdout(&output).is_empty());
     assert!(api.requests().is_empty());
 }
@@ -2237,10 +2237,10 @@ fn bash_completes_commands_flags_and_shell_names() {
 
     assert_eq!(
         bash_complete(&sandbox, "godspeed-cli ", &["godspeed-cli", ""]),
-        vec!["add", "edit", "show", "queue", "lists", "labels", "refresh", "search", "completions", "--help", "--version"]
+        vec!["add", "edit", "show", "queue", "lists", "labels", "refresh", "search", "searches", "completions", "--help", "--version", "overdue", "today"]
     );
     assert_eq!(bash_complete(&sandbox, "godspeed-cli re", &["godspeed-cli", "re"]), vec!["refresh"]);
-    assert_eq!(bash_complete(&sandbox, "godspeed-cli s", &["godspeed-cli", "s"]), vec!["show", "search"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli s", &["godspeed-cli", "s"]), vec!["show", "search", "searches"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli --v", &["godspeed-cli", "--v"]), vec!["--version"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli completions ", &["godspeed-cli", "completions", ""]), vec!["bash", "fish", "zsh"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli completions z", &["godspeed-cli", "completions", "z"]), vec!["zsh"]);
@@ -4486,4 +4486,305 @@ fn edit_dry_run_json_and_an_id_the_copy_does_not_know() {
     );
     assert!(stdout(&unknown).contains("(not in the local copy, so not checked)"), "{}", stdout(&unknown));
     assert!(requests_with(&api, "PATCH").is_empty());
+}
+
+// ---- saved searches: today, overdue, searches, and running them by name ----
+
+impl Sandbox {
+    fn read_config(&self) -> String {
+        fs::read_to_string(self.data_home.join(".config/godspeed-cli/config.toml")).unwrap_or_default()
+    }
+
+    /// Runs the binary with no token and no API, as `search` does.
+    fn offline(&self, args: &[&str]) -> Output {
+        self.run_with(None, None, args, None)
+    }
+}
+
+/// A copy with tasks due yesterday, today, in a week and never, and a completed one that was
+/// due yesterday.
+fn dated_copy(name: &str) -> Sandbox {
+    let day = |offset: i64| (today() + Duration::days(offset)).format("%Y-%m-%d").to_string();
+    let api = MockApi::start(200);
+    api.queue_page_with(
+        vec![
+            json!({"id": "d-late", "title": "Late report", "list_id": "list-work", "label_ids": ["label-low"], "timeless_due_at": day(-1), "updated_at": "2026-03-05T00:00:00Z"}),
+            json!({"id": "d-today", "title": "Today call", "list_id": "list-home", "timeless_due_at": day(0), "updated_at": "2026-03-04T00:00:00Z"}),
+            json!({"id": "d-week", "title": "Next week plan", "list_id": "list-work", "timeless_due_at": day(7), "updated_at": "2026-03-03T00:00:00Z"}),
+            json!({"id": "d-none", "title": "Someday idea", "list_id": "list-home", "updated_at": "2026-03-02T00:00:00Z"}),
+        ],
+        search_lists(),
+        search_labels(),
+    );
+    api.queue_page_with(
+        vec![json!({"id": "d-done", "title": "Finished late", "list_id": "list-work", "timeless_due_at": day(-1), "updated_at": "2026-03-06T00:00:00Z"})],
+        search_lists(),
+        search_labels(),
+    );
+    let sandbox = Sandbox::new(name);
+    let output = sandbox.run(&api, &["refresh", "--include-completed"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    sandbox
+}
+
+#[test]
+fn today_and_overdue_work_as_commands_with_no_settings_and_hide_completed_tasks() {
+    let sandbox = dated_copy("saved-built-in");
+
+    let today = sandbox.offline(&["today", "--ids-only"]);
+    let overdue = sandbox.offline(&["overdue", "--ids-only"]);
+
+    assert_eq!(code(&today), 0, "{}", stderr(&today));
+    assert_eq!(lines(&today), vec!["d-today"]);
+    assert_eq!(lines(&overdue), vec!["d-late"], "the completed task that was due yesterday is not shown");
+    assert!(stderr(&overdue).is_empty(), "{}", stderr(&overdue));
+}
+
+#[test]
+fn completed_tasks_show_only_when_the_search_says_is_complete() {
+    let sandbox = dated_copy("saved-completed");
+
+    let with_completed = sandbox.offline(&["overdue", "is:complete", "--ids-only"]);
+    let by_name = sandbox.offline(&["search", "@overdue is:complete", "--ids-only"]);
+
+    assert_eq!(lines(&with_completed), vec!["d-done"], "is:complete picks the completed ones");
+    assert_eq!(lines(&by_name), vec!["d-done"]);
+}
+
+#[test]
+fn a_saved_search_can_be_run_by_name_through_search_and_given_more_words_and_options() {
+    let sandbox = dated_copy("saved-by-name");
+    sandbox.write_config("[searches]\nwork = \"list:Work\"\nlow = \"label:Low\"\n");
+
+    let direct = sandbox.offline(&["work", "--ids-only"]);
+    let via_search = sandbox.offline(&["search", "@work", "--ids-only"]);
+    let narrowed = sandbox.offline(&["work", "label:Low", "--ids-only"]);
+    let negated = sandbox.offline(&["search", "-@low", "list:Work", "--ids-only"]);
+    let either = sandbox.offline(&["search", "@low | @today", "--ids-only"]);
+    let counted = sandbox.offline(&["work", "--count"]);
+    let json_out = sandbox.offline(&["work", "--json"]);
+    let uppercase = sandbox.offline(&["Work", "--ids-only"]);
+
+    assert_eq!(lines(&direct), vec!["d-late", "d-week"]);
+    assert_eq!(lines(&via_search), lines(&direct));
+    assert_eq!(lines(&narrowed), vec!["d-late"]);
+    assert_eq!(lines(&negated), vec!["d-week"]);
+    assert_eq!(lines(&either), vec!["d-late", "d-today"]);
+    assert_eq!(stdout(&counted), "2\n");
+    assert_eq!(ids_in_json(&json_out), vec!["d-late", "d-week"]);
+    assert_eq!(lines(&uppercase), lines(&direct), "the name is not case-sensitive");
+}
+
+#[test]
+fn your_own_search_replaces_a_built_in_one_with_the_same_name() {
+    let sandbox = dated_copy("saved-override");
+    sandbox.write_config("[searches]\ntoday = \"due<=today list:Work\"\n");
+
+    let overridden = sandbox.offline(&["today", "--ids-only"]);
+    let listing = sandbox.offline(&["searches"]);
+    let other = sandbox.offline(&["overdue", "--ids-only"]);
+
+    assert_eq!(lines(&overridden), vec!["d-late"]);
+    assert_eq!(lines(&other), vec!["d-late"], "the other built-in is untouched");
+    assert!(stdout(&listing).contains("settings (replaces the built-in)"), "{}", stdout(&listing));
+}
+
+#[test]
+fn an_unknown_word_is_still_an_error_and_a_task_is_never_created_by_one() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("saved-unknown");
+    sandbox.write_config("[searches]\ninbox = \"list:Inbox\"\n");
+
+    let output = sandbox.run(&api, &["buy", "milk"]);
+    let near = sandbox.run(&api, &["inboxes"]);
+
+    for output in [&output, &near] {
+        assert_eq!(code(output), 2);
+        assert!(stderr(output).contains("isn't a valid godspeed-cli command"), "{}", stderr(output));
+        assert!(stderr(output).contains("godspeed-cli searches"), "the error points to saved searches: {}", stderr(output));
+    }
+    assert!(api.requests().is_empty());
+}
+
+#[test]
+fn a_name_that_is_not_saved_in_a_search_is_an_error_naming_the_saved_ones_and_a_quoted_word_is_text() {
+    let sandbox = dated_copy("saved-unknown-at");
+    sandbox.write_config("[searches]\ninbox = \"list:Inbox\"\n");
+
+    let output = sandbox.offline(&["search", "@nothing"]);
+    let quoted = sandbox.offline(&["search", "\"@nothing\"", "--count"]);
+
+    assert_eq!(code(&output), 2);
+    assert!(stderr(&output).contains("No saved search 'nothing'") && stderr(&output).contains("inbox, overdue, today"), "{}", stderr(&output));
+    assert_eq!(stdout(&quoted), "0\n");
+}
+
+#[test]
+fn a_saved_search_that_is_wrong_or_loops_is_reported_by_name() {
+    let sandbox = dated_copy("saved-wrong");
+    sandbox.write_config("[searches]\nbad = \"milk sort:colour\"\na = \"@b\"\nb = \"@a\"\n");
+
+    let bad = sandbox.offline(&["bad"]);
+    let looping = sandbox.offline(&["a"]);
+
+    assert_eq!(code(&bad), 2);
+    assert!(stderr(&bad).contains("In saved search 'bad':") && stderr(&bad).contains("Unknown sort field"), "{}", stderr(&bad));
+    assert_eq!(code(&looping), 2);
+    assert!(stderr(&looping).contains("lead back to themselves"), "{}", stderr(&looping));
+}
+
+#[test]
+fn a_saved_search_named_like_a_command_is_an_error_everywhere_the_settings_are_read_but_add_still_works() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("saved-clash");
+    sandbox.write_config("max_age = \"6h\"\n\n[searches]\nqueue = \"label:Low\"\ninbox = \"list:Inbox\"\n");
+
+    let search = sandbox.run(&api, &["search"]);
+    let refresh = sandbox.run(&api, &["refresh"]);
+    let listing = sandbox.run(&api, &["searches"]);
+    let direct = sandbox.run(&api, &["inbox"]);
+    let added = sandbox.run(&api, &["add", "Buy milk"]);
+
+    for output in [&search, &refresh, &listing] {
+        assert_eq!(code(output), 2, "{}", stderr(output));
+        assert!(stderr(output).contains("saved search 'queue'"), "{}", stderr(output));
+        assert!(stderr(output).contains("name of a godspeed-cli command"), "{}", stderr(output));
+        assert!(stderr(output).contains("Rename it"), "{}", stderr(output));
+    }
+    assert_eq!(code(&direct), 2);
+    assert!(stderr(&direct).contains("isn't a command, and the settings file has a problem"), "{}", stderr(&direct));
+    assert_eq!(code(&added), 0, "capturing a task never reads the settings: {}", stderr(&added));
+    assert!(requests_with(&api, "GET").iter().all(|r| r.path != "/tasks"), "nothing was refreshed");
+
+    // `searches remove` can fix it.
+    let removed = sandbox.run(&api, &["searches", "remove", "queue"]);
+    assert_eq!(code(&removed), 0, "{}", stderr(&removed));
+    let config = sandbox.read_config();
+    assert!(!config.contains("queue") && config.contains("inbox = \"list:Inbox\"") && config.contains("max_age = \"6h\""), "{config}");
+    assert_eq!(code(&sandbox.run(&api, &["searches"])), 0);
+}
+
+#[test]
+fn searches_lists_shows_adds_and_removes_and_keeps_the_rest_of_the_file() {
+    let sandbox = Sandbox::new("searches-manage");
+    sandbox.write_config("# my settings\nmax_age = \"6h\"\n");
+
+    let list = sandbox.offline(&["searches"]);
+    let added = sandbox.offline(&["searches", "add", "Inbox", "list:Inbox", "sort-desc:created"]);
+    let replaced = sandbox.offline(&["searches", "add", "inbox", "list:Inbox", "-has:notes"]);
+    let waiting = sandbox.offline(&["searches", "add", "waiting", "@inbox", "label:Waiting"]);
+    let show = sandbox.offline(&["searches", "show", "@inbox"]);
+    let json_out = sandbox.offline(&["searches", "--json"]);
+    let count = sandbox.offline(&["searches", "--count"]);
+    let removed = sandbox.offline(&["searches", "remove", "waiting"]);
+
+    assert_eq!(lines(&list), vec!["NAME     QUERY               FROM", "overdue  due<today sort:due  built-in", "today    due:today sort:due  built-in"]);
+    assert_eq!(code(&added), 0, "{}", stderr(&added));
+    assert!(stdout(&added).contains("Saved 'inbox'") && stdout(&added).contains("godspeed-cli inbox"), "{}", stdout(&added));
+    assert!(stdout(&replaced).contains("Replaced 'inbox' (it was: list:Inbox sort-desc:created)"), "{}", stdout(&replaced));
+    assert_eq!(code(&waiting), 0, "{}", stderr(&waiting));
+    assert!(stdout(&show).contains("inbox  (settings)\n  list:Inbox -has:notes"), "{}", stdout(&show));
+    let all: Value = serde_json::from_str(&stdout(&json_out)).unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 4);
+    assert_eq!(stdout(&count), "4\n");
+    assert_eq!(code(&removed), 0, "{}", stderr(&removed));
+    assert_eq!(
+        sandbox.read_config(),
+        "# my settings\nmax_age = \"6h\"\n\n[searches]\ninbox = \"list:Inbox -has:notes\"\n"
+    );
+}
+
+#[test]
+fn searches_add_refuses_a_command_name_a_bad_name_and_a_query_that_does_not_work_and_writes_nothing() {
+    let sandbox = Sandbox::new("searches-refuse");
+
+    let command = sandbox.offline(&["searches", "add", "queue", "milk"]);
+    let reserved = sandbox.offline(&["searches", "add", "help", "milk"]);
+    let spaced = sandbox.offline(&["searches", "add", "two words", "milk"]);
+    let sort = sandbox.offline(&["searches", "add", "x", "milk", "sort:colour"]);
+    let unknown_ref = sandbox.offline(&["searches", "add", "y", "@nothing"]);
+    let looping = sandbox.offline(&["searches", "add", "z", "@z"]);
+    let empty = sandbox.offline(&["searches", "add", "w"]);
+    let none = sandbox.offline(&["searches", "add"]);
+
+    for output in [&command, &reserved, &spaced, &sort, &unknown_ref, &looping, &empty, &none] {
+        assert_eq!(code(output), 2, "{}", stderr(output));
+    }
+    assert!(stderr(&command).contains("name of a godspeed-cli command"), "{}", stderr(&command));
+    assert!(stderr(&sort).contains("Unknown sort field"), "{}", stderr(&sort));
+    assert!(stderr(&looping).contains("lead back"), "{}", stderr(&looping));
+    assert_eq!(sandbox.read_config(), "", "nothing was written");
+}
+
+#[test]
+fn removing_a_built_in_or_unknown_search_says_how_and_a_removed_override_brings_the_built_in_back() {
+    let sandbox = dated_copy("searches-remove");
+    sandbox.write_config("[searches]\ntoday = \"list:Work\"\n");
+
+    let built_in = sandbox.offline(&["searches", "remove", "overdue"]);
+    let unknown = sandbox.offline(&["searches", "remove", "nothing"]);
+    let override_removed = sandbox.offline(&["searches", "remove", "today"]);
+    let back = sandbox.offline(&["today", "--ids-only"]);
+
+    assert_eq!(code(&built_in), 2);
+    assert!(stderr(&built_in).contains("It is built in"), "{}", stderr(&built_in));
+    assert_eq!(code(&unknown), 2);
+    assert_eq!(code(&override_removed), 0);
+    assert!(stdout(&override_removed).contains("The built-in 'today' is used again."), "{}", stdout(&override_removed));
+    assert_eq!(lines(&back), vec!["d-today"]);
+}
+
+#[test]
+fn a_settings_file_the_line_editor_cannot_handle_is_left_alone() {
+    let sandbox = Sandbox::new("searches-inline");
+    let original = "searches = { inbox = \"list:Inbox\" }\n";
+    sandbox.write_config(original);
+
+    let output = sandbox.offline(&["searches", "add", "work", "list:Work"]);
+
+    assert_eq!(code(&output), 2);
+    assert_eq!(sandbox.read_config(), original);
+}
+
+#[test]
+fn a_saved_search_has_its_own_help_and_searches_has_a_help_page() {
+    let sandbox = Sandbox::new("saved-help");
+    sandbox.write_config("[searches]\ninbox = \"list:Inbox\"\n");
+
+    let saved = sandbox.offline(&["inbox", "--help"]);
+    let built_in = sandbox.offline(&["overdue", "-h"]);
+    let page = sandbox.offline(&["searches", "--help"]);
+
+    assert_eq!(code(&saved), 0);
+    assert!(stdout(&saved).contains("'inbox' is a saved search") && stdout(&saved).contains("search \"list:Inbox\""), "{}", stdout(&saved));
+    assert!(stdout(&built_in).contains("due<today sort:due"), "{}", stdout(&built_in));
+    assert!(stdout(&page).contains("Give a search a name"), "{}", stdout(&page));
+}
+
+#[test]
+fn the_names_of_the_saved_searches_are_offered_for_tab_completion() {
+    let sandbox = Sandbox::new("saved-complete");
+    sandbox.write_config("[searches]\nInbox = \"list:Inbox\"\nqueue = \"x\"\n\"two words\" = \"y\"\n");
+
+    let names = sandbox.offline(&["__complete", "searches"]);
+
+    assert_eq!(code(&names), 0);
+    assert_eq!(lines(&names), vec!["inbox", "overdue", "today"], "built-in ones too; a name that is not usable is left out");
+    let broken = Sandbox::new("saved-complete-broken");
+    broken.write_config("this is [[[ not toml");
+    assert_eq!(lines(&broken.offline(&["__complete", "searches"])), vec!["overdue", "today"], "never an error");
+}
+
+#[test]
+fn bash_completes_saved_search_names_as_commands_and_after_an_at_sign() {
+    needs_bash!();
+    let sandbox = Sandbox::new("bash-saved");
+    sandbox.write_config("[searches]\ninbox = \"list:Inbox\"\n");
+    let g = "godspeed-cli";
+
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli i", &[g, "i"]), vec!["inbox"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli o", &[g, "o"]), vec!["overdue"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search @i", &[g, "search", "@i"]), vec!["@inbox"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli searches ", &[g, "searches", ""]), vec!["list", "show", "add", "remove", "--json", "--count"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli searches show t", &[g, "searches", "show", "t"]), vec!["today"]);
 }

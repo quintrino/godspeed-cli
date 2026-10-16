@@ -66,6 +66,7 @@ echo "Buy groceries and cook dinner" | godspeed-cli add
 | --- | --- |
 | `add` | Create a task, with the task syntax or options like `--due` and `--label`. `--each` makes a task of every line piped in, `--dry-run` shows what would be created, and `--json` prints the API's response. See [Options of `add`](#options-of-add). |
 | `edit` | Edit, complete, snooze, set the due date, duration or labels of, delete or move a task, by id, or many ids piped in. See [Edit](#edit). |
+| `searches` | Name a search and run it by that name (`godspeed-cli today`), list, add and remove saved searches. `today` and `overdue` are built in. See [Saved searches](#saved-searches). |
 | `show` | Show everything the local copy knows about one task. See [Show](#show). |
 | `queue` | Show, retry or drop what is waiting to be sent. See [Queue](#queue). |
 | `lists`, `labels` | Show your lists or labels, or those matching a string. See [Lists and labels](#lists-and-labels). |
@@ -368,6 +369,9 @@ An optional file, `$XDG_CONFIG_HOME/godspeed-cli/config.toml` (`~/.config/godspe
 max_age = "12h"            # search refreshes first when the copy is older than this
 include_completed = true   # refresh keeps completed tasks as well
 full_refresh_after = "7d"  # a refresh is a full one when the last full one is this old
+
+[searches]                 # saved searches, run with `godspeed-cli inbox`
+inbox = "list:Inbox sort-desc:created"
 ```
 
 | Setting | Default | Meaning |
@@ -375,6 +379,7 @@ full_refresh_after = "7d"  # a refresh is a full one when the last full one is t
 | `max_age` | none | `search` refreshes first when the copy is older than this. Without it, `search` never refreshes by itself |
 | `include_completed` | `false` | `refresh` keeps completed tasks, as if `--include-completed` were given |
 | `full_refresh_after` | `"7d"` | How old the last full refresh may get before the next refresh is a full one. `"never"` turns it off |
+| `[searches]` | the built-in `today` and `overdue` | Saved searches, one `name = "query"` line each. See [Saved searches](#saved-searches) |
 
 Durations are written like `30m`, `12h`, `1 day` or `1 day and 6 hours`. `"0"` means always, and `"never"` turns a setting off. A mistake in the file (an unknown setting, a value that isn't a duration) is an error that names the file, so a typo can't silently do nothing.
 
@@ -516,6 +521,67 @@ JSON (`--json`) is never coloured. The colour is added around the header and aro
 Search reads these fields from each task's JSON: `title`, `notes`, `attachments`, `list_id` (and `list_ordinals`), `label_ids`, `due_at`, `timeless_due_at`, `snoozed_until`, `timeless_snoozed_until`, `starts_at`, `timeless_starts_at`, `created_at`, `updated_at`, `duration_minutes`, `snooze_count`, `indent_level`, `repeat` / `recurrence` / `repeat_rule`, `bookmarked_at`, `email` / `email_id` / `source_email`, `cleared_at` / `is_cleared`. Lists use `name`, and `path` or `parent_id` for folders; labels use `name`, and `group_name` / `group_id` for label groups. Lists are ordered as the API returned them, which is taken to be the sidebar order.
 
 `title`, `notes`, `list_id`, `label_ids`, `timeless_due_at` and `duration_minutes` are the fields that task creation sends. The others were taken from another Godspeed client and have **not been checked against a real account**; in particular, how folders and label groups are represented is a guess. If an operator never matches, look at what the API returned for one of your tasks (`sqlite3 ~/.local/share/godspeed-cli/cache.sqlite3 'select json from tasks limit 1'`) and compare the field names. They are all read in `src/eval.rs`.
+
+## Saved searches
+
+Give a search a name, then run it by that name, as if it were a command:
+
+```bash
+godspeed-cli searches add inbox 'list:Inbox sort-desc:created'
+godspeed-cli inbox                       # the same as: godspeed-cli search @inbox
+godspeed-cli inbox label:Low --json      # more search words and any `search` option
+godspeed-cli today                       # built in
+godspeed-cli overdue --ids-only | godspeed-cli edit --snooze tomorrow
+```
+
+### Built in
+
+| Name | Search |
+| --- | --- |
+| `today` | `due:today sort:due` |
+| `overdue` | `due<today sort:due` |
+
+They work with no settings. Neither says anything about completed tasks, because a search only shows incomplete tasks unless its query has `is:complete`: `godspeed-cli overdue is:complete` finds the completed tasks that were overdue. To change one, save your own with the same name (`godspeed-cli searches add today 'due:today list:Work'`); `searches remove today` brings the built-in back.
+
+### Where they are kept
+
+In the `[searches]` table of the [settings file](#settings-file), one `name = "query"` line each. They can be written by hand:
+
+```toml
+[searches]
+inbox = "list:Inbox sort-desc:created"
+waiting = "label:Waiting group:list"
+quick = "duration<=15m limit:10"
+```
+
+`godspeed-cli searches add` and `remove` edit that table by adding, changing or deleting its line. Everything else in the file, comments included, is kept. The edit is checked before anything is written, and if the file is laid out in a way that can't be edited safely (an inline `searches = { ... }`, for instance), nothing is written and you are told to edit it by hand.
+
+| Command | |
+| --- | --- |
+| `searches` (or `searches list`) | List them and where each comes from. `--json` and `--count` are there for scripts. |
+| `searches show NAME` | Print one. |
+| `searches add NAME QUERY...` | Save one, or replace it. The query is tried first, including any `@name` in it. |
+| `searches remove NAME` | Take one out of the settings file. |
+
+### How a saved search is used
+
+- `@name` in a search is replaced by the saved query **in parentheses**, so `a | b` in a saved search stays together: `search '@either urgent'` means `(a | b) urgent`, and `-@name` is "not this search". `sort:`, `group:` and `limit:` come with it. If you add your own, a later `limit:` or `group:` replaces the saved one (the last one wins, as in any search), and an extra `sort:` is applied after the saved one, to order the tasks it leaves tied.
+- A saved search can use others, up to eight deep. One that leads back to itself is an error. A mistake inside one says which: `In saved search 'inbox': Unknown sort field 'colour'`.
+- `@name` that isn't saved is an error that lists the saved names. To search for a title that really contains `@something`, quote it: `search '"@something"'`.
+- Running one by name only works for names that are saved or built in. **Anything else that isn't a command is still an error**, so a typo can never create a task.
+- `godspeed-cli NAME --help` shows what it runs. Names aren't case-sensitive.
+
+### Names, and clashes with commands
+
+A name is lowercase letters, digits, `-` and `_`, starting with a letter or digit, up to 40 characters. It can't be the name of a command (`add`, `edit`, `show`, `queue`, `lists`, `labels`, `refresh`, `search`, `searches`, `completions`) or of a word kept for one (`help`, `version`, `list`, `config`, `settings`, `delete`), because the command would always win and the search could never run. `searches add` refuses such a name.
+
+If a later version adds a command whose name you have already used for a search, you aren't left with a search that silently stops working: every command that reads the settings (`search`, `refresh`, `searches`, and a saved search by name) stops with an error that says which search it is and how to rename it:
+
+```
+Error: saved search 'queue': 'queue' is the name of a godspeed-cli command, or one kept for a future command, so it can't be a saved search. Rename it in the settings file, such as to 'queues' or 'my-queue'
+```
+
+`godspeed-cli searches remove queue` works even then, and so does editing the file; `add`, which doesn't read the settings, keeps working throughout. Tab completion offers the saved names as commands and after `@` in `search`.
 
 ## Lists and labels
 

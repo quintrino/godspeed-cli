@@ -114,7 +114,7 @@ fn item_matches(item: &Value, filter: &str) -> bool {
 
 /// A table with the header row first. Columns are as wide as their widest cell, and the last
 /// column isn't padded.
-fn table(rows: &[Vec<String>], color: bool) -> String {
+pub(crate) fn table(rows: &[Vec<String>], color: bool) -> String {
     let columns = rows.first().map_or(0, Vec::len);
     let widths: Vec<usize> =
         (0..columns).map(|c| rows.iter().map(|row| row[c].chars().count()).max().unwrap_or(0)).collect();
