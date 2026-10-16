@@ -1,5 +1,6 @@
 mod api;
 mod capture;
+mod dates;
 mod eval;
 mod exit;
 mod names;
@@ -71,74 +72,97 @@ EXIT STATUS:
 "#;
 
 const SEARCH_HELP: &str = r#"Search the local copy of your tasks made by `godspeed-cli refresh`. Works offline.
+The query language follows Godspeed's search operators guide.
 
 USAGE:
     godspeed-cli search [--json] [QUERY]...
 
-By default only incomplete tasks are searched. Add is:complete to include completed ones
-(they are only there if you refreshed with --include-completed). With no query, every
-incomplete task is listed. The words of the query are joined with spaces, so quote the whole
-query when it contains characters the shell would use, such as ( ) | & ! < > "
+By default only incomplete tasks are searched. is:complete (not part of Godspeed's guide) and
+is:uncleared add completed tasks; they are only in the local copy if you refreshed with
+--include-completed. With no query, every incomplete task is listed. The words of the query
+are joined with spaces, so quote the whole query when it contains characters the shell would
+use, such as ( ) | & ! < > "
 
 EXAMPLES:
-    godspeed-cli search invoice
-    godspeed-cli search 'due:20261031 label:Low'
-    godspeed-cli search 'is:complete label:Low sort-desc:created'
-    godspeed-cli search 'title:"tax return" list:Admin'
-    godspeed-cli search '(label:Low | label:Medium) due<=2026-10-31'
-    godspeed-cli search 'has:notes duration>=30m group:list sort-desc:due limit:20'
+    godspeed-cli search research pdf
+    godspeed-cli search 'feature & (bug | error)'
+    godspeed-cli search 'research -"budget meeting"'
+    godspeed-cli search 'research in:"engineering q2"'
+    godspeed-cli search 'due<=3h'
+    godspeed-cli search 'snoozed>="Oct 14th 12am" & snoozed<="Oct 14th 1159pm"'
+    godspeed-cli search 'due:today group:list sort:due'
+    godspeed-cli search 'duration>="1 hour and 30 minutes" has:notes limit:10'
 
 MATCHING:
-    word                 Case-insensitive; found anywhere in the title, notes or attachment names
-    "exact phrase"       The phrase, found anywhere in the same text
-    a b                  Both (a space means AND), as does a & b
+    word                 Ignores case and word order; found in the title, notes or attachment names
+    "exact phrase"       The exact characters, spaces included
+    a b                  Both words (a space means AND), as does a & b
     a | b                Either
-    !a  or  -a           Not a
-    ( ... )              Grouping. | binds loosest, then AND, then !
-    Anything else that looks like operator:value but isn't an operator below is a plain word.
+    !a  or  -a           Not a. Works on words, phrases and every operator below
+    ( ... )              Grouping, which can be nested. | binds loosest, then AND, then !
+    Anything that looks like operator:value but isn't an operator below is a plain word.
 
-FIELDS (case-insensitive, matched anywhere in the value; quote values with spaces):
-    title:VALUE  notes:VALUE  attachment:VALUE
-    list:VALUE           The list's name
-    folder:VALUE         The list's path, or its name if it has none (in:VALUE is the same)
-    label:VALUE          A label's name
-    label-group:VALUE    The group a label belongs to
+TITLE, NOTES, ATTACHMENT:
+    title:TEXT  notes:TEXT  attachment:TEXT      (attachment searches the file name only)
+
+LISTS, FOLDERS, LABELS (a name, or an id; names match anywhere in the name, quote them if they
+contain spaces):
+    list:VALUE           Tasks in a list
+    folder:VALUE         Tasks in a list inside a folder with that name
+    in:VALUE             Tasks in a list or in a folder
+    label:VALUE          Tasks with a label
+    label-group:VALUE    Tasks with a label in that label group
 
 DATES (due, first-due, snoozed, start, created):
-    due:DATE             On that date. due=DATE is the same
     due<DATE  due<=DATE  due>DATE  due>=DATE
-    due is the later of the due date and the snooze date; first-due ignores snoozes.
-    A task without that date never matches a date test (so !due:today does match it).
-    DATE is today, tomorrow, yesterday, YYYYMMDD, YYYY-MM-DD, or relative: 3d, -2d, 2w, 24h
-    (hours are rounded down to whole days). After : or = you can also use the periods
-    week, next-week, month and year (weeks run Monday to Sunday).
+    due:today  due:tomorrow  due:week  due:next-week  due:month  due:year
+    due is the effective due date, the later of the due date and the snooze date; first-due is
+    the due date alone. A task without that date never matches (so !due:today does match it).
+    DATE is read as in Godspeed's date picker: 3h, 2d, 1w, -2d, in 3 days, tomorrow, friday,
+    Oct 14th, "Oct 14th 12am", 2026-10-31, 20261031, noon, 3pm. Quote it if it has spaces.
+    A date with no time covers the whole day: due<=2026-10-31 includes things due that day.
+    With a time, or a relative amount like 3h, it is that exact moment. A task's date with no
+    time counts as the start of its day. due:DATE with a date means that calendar day.
+    Weeks run Monday to Sunday. A month and day with no year is the closest one to today.
 
-NUMBERS:
-    duration<30m  duration>=1.5h  duration:45     Minutes, or with an m or h suffix
-    snooze-count=2  indent-level>0
-    <  <=  >  >=  =  (or : for =). A task without the value never matches.
+DURATION, SNOOZE COUNT, INDENT LEVEL (<  <=  >  >=  =):
+    duration<15m  duration>=1.5h  duration>="1 hour and 30 minutes"  duration=45
+    snooze-count>=10     indent-level=0 finds top-level tasks
+    A task without the value never matches.
 
 TRAITS:
     has:notes  has:attachment  has:label  has:repeat  has:due  has:snooze  has:start
     has:due-time  has:start-time  has:bookmark  has:email  has:duration
-    has:any              Has at least one of the traits above (not counting the two time ones)
+    has:any              Every task
 
 STATES:
-    is:complete          Completed tasks; adds them to the search
-    is:available         No start date or snooze still in the future
-    is:uncleared         Completed but not yet cleared
+    is:available         No start date, or a start date in the past (snoozes don't matter)
+    is:uncleared         Completed but not yet cleared. Incomplete tasks never match
+    is:complete          Completed tasks (not in Godspeed's guide)
 
-PRESENTATION:
-    sort:FIELD  sort-asc:FIELD  sort-desc:FIELD     Repeat to sort by several fields in turn
-        FIELD is title, list, label, due, first-due, snoozed, start, created, updated,
-        duration, snooze-count or indent-level. Tasks without a value come last.
-        Put names first with a priority list: sort:label:High|Medium|Low
-    group:FIELD          list, label, due, first-due, snoozed, start or created
-        group:list:Work|Home puts those groups first. A task with several labels is
-        shown under one, unless enable:duplicates is given.
+GROUPING:
+    group:list  group:label  group:label-group  group:due  group:start  group:due-or-start
+    group:created        (first-due and snoozed work too)
+        With several labels or label groups, the first alphabetically is used.
+        due is the date of the effective due date; due-or-start uses the start date if there
+        is no due date. Tasks with no value go in a group called None.
+        Target lists: group:label:p0|p1|p2 makes those groups, in that order, and puts any
+        task with none of them in None. group:list:Morning|"After lunch" quotes names with
+        spaces, and ids work too. End with ...rest (group:label:Bug|Feature|...rest) and tasks
+        matching no target are grouped normally instead of going into None.
+
+SORTING:
+    sort:FIELD  sort-asc:FIELD  sort-desc:FIELD     Ascending is the default; repeat to sort
+        by several fields in turn. FIELD is due, first-due, snoozed, start, created, modified,
+        title, label, duration, snooze-count, or list (the order of your sidebar; also
+        indent-level). Tasks without a value come last.
+        label and list take a target list, as in sort:label:High|Medium|Low
     limit:N              At most N tasks, after sorting
-    enable:duplicates  disable:duplicates
-    enable:nested and disable:nested are not supported and are rejected.
+
+NESTED AND DUPLICATE TASKS:
+    enable:duplicates  disable:duplicates   With duplicates on, a task with several labels,
+        label groups or lists appears in each group when grouping.
+    enable:nested  disable:nested           Accepted, but results are always a flat list.
 
 OPTIONS:
     --json               Print the tasks as JSON (the full records, plus list_names and
@@ -345,13 +369,16 @@ mod tests {
     #[test]
     fn the_search_help_documents_every_operator() {
         for text in [
-            "title:VALUE", "notes:VALUE", "attachment:VALUE", "list:VALUE", "folder:VALUE", "in:VALUE",
-            "label:VALUE", "label-group:VALUE", "due:DATE", "due<=DATE", "first-due", "snoozed", "start", "created",
-            "duration<30m", "snooze-count=2", "indent-level>0", "has:notes", "has:attachment", "has:label",
-            "has:repeat", "has:due", "has:snooze", "has:start", "has:due-time", "has:start-time", "has:bookmark",
-            "has:email", "has:duration", "has:any", "is:complete", "is:available", "is:uncleared", "sort:FIELD",
-            "sort-asc:FIELD", "sort-desc:FIELD", "group:FIELD", "limit:N", "enable:duplicates", "disable:duplicates",
-            "enable:nested", "--json", "EXIT STATUS", "next-week", "sort:label:High|Medium|Low", "group:list:Work|Home",
+            "title:TEXT", "notes:TEXT", "attachment:TEXT", "list:VALUE", "folder:VALUE", "in:VALUE",
+            "label:VALUE", "label-group:VALUE", "due<DATE", "due<=DATE", "due>DATE", "due>=DATE", "due:today",
+            "due:tomorrow", "due:week", "due:next-week", "due:month", "due:year", "first-due", "snoozed", "start",
+            "created", "duration<15m", "snooze-count>=10", "indent-level=0", "has:notes", "has:attachment",
+            "has:label", "has:repeat", "has:due", "has:snooze", "has:start", "has:due-time", "has:start-time",
+            "has:bookmark", "has:email", "has:duration", "has:any", "is:complete", "is:available", "is:uncleared",
+            "sort:FIELD", "sort-asc:FIELD", "sort-desc:FIELD", "limit:N", "enable:duplicates", "disable:duplicates",
+            "enable:nested", "disable:nested", "--json", "EXIT STATUS", "group:label:p0|p1|p2", "...rest",
+            "group:due-or-start", "group:label-group", "modified", "sidebar", "None", "sort:label:High|Medium|Low",
+            "\"exact phrase\"", "in 3 days", "\"Oct 14th 12am\"",
         ] {
             assert!(SEARCH_HELP.contains(text), "{text} is not in the search help");
         }

@@ -1,15 +1,18 @@
 //! Putting search results in order, grouping them, applying `limit:`, and printing them as a
 //! fixed-width table or as JSON.
 
-use crate::eval::Context;
-use crate::query::{DateField, GroupField, NumField, Query, SortField, SortSpec};
+use crate::eval::{Context, Named};
+use crate::query::{DateField, GroupField, GroupSpec, NumField, Query, SortField, SortSpec};
 use crate::store::StoredTask;
-use chrono::NaiveDate;
+use chrono::NaiveDateTime;
 use serde_json::{json, Value};
 use std::cmp::Ordering;
 
 /// Column widths of the table: title, list, due date, labels.
 const WIDTHS: [usize; 4] = [80, 12, 10, 20];
+
+/// The name of the group for tasks that have no value to group by.
+const NONE_GROUP: &str = "None";
 
 /// What a task is ordered by. A value the task doesn't have sorts after every real one.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -17,7 +20,7 @@ enum Key {
     Missing,
     Text(String),
     Num(i64),
-    Date(NaiveDate),
+    Moment(NaiveDateTime),
     /// Position among the priority targets, then name.
     Rank(usize, String),
 }
@@ -32,14 +35,15 @@ fn compare_keys(a: &Key, b: &Key, descending: bool) -> Ordering {
     }
 }
 
-fn rank_of(name: &str, targets: &[String]) -> usize {
-    let name = name.to_lowercase();
-    targets.iter().position(|t| *t == name).unwrap_or(targets.len())
+/// Where a name or id falls among the targets, or after all of them.
+fn rank_of(item: &Named, targets: &[String]) -> usize {
+    targets.iter().position(|target| item.is(target)).unwrap_or(targets.len())
 }
 
-/// The sort key for a task that has several names (lists or labels): the best-ranked one.
-fn key_for_names(names: &[String], targets: &[String]) -> Key {
-    let best = names.iter().map(|name| (rank_of(name, targets), name.to_lowercase())).min();
+/// The sort key for a task that has several lists, labels or groups: the best-ranked one, or
+/// the first alphabetically when there are no targets.
+fn key_for(items: &[Named], targets: &[String]) -> Key {
+    let best = items.iter().map(|item| (rank_of(item, targets), item.name.to_lowercase())).min();
     match best {
         None => Key::Missing,
         Some((_, name)) if targets.is_empty() => Key::Text(name),
@@ -47,23 +51,29 @@ fn key_for_names(names: &[String], targets: &[String]) -> Key {
     }
 }
 
-fn date_key(date: Option<NaiveDate>) -> Key {
-    date.map_or(Key::Missing, Key::Date)
+fn moment_key(moment: Option<NaiveDateTime>) -> Key {
+    moment.map_or(Key::Missing, Key::Moment)
 }
 
 fn sort_key(spec: &SortSpec, task: &StoredTask, ctx: &Context) -> Key {
     let json = &task.json;
-    let number = |field| ctx.number(json, field).map_or(Key::Missing, Key::Num);
+    let number = |field| ctx.number(json, field).map_or(Key::Missing, |n| Key::Num(n));
     match spec.field {
         SortField::Title => json.get("title").and_then(Value::as_str).map_or(Key::Missing, |t| Key::Text(t.to_lowercase())),
-        SortField::List => key_for_names(&ctx.list_names(json), &spec.targets),
-        SortField::Label => key_for_names(&ctx.label_names(json), &spec.targets),
-        SortField::Due => date_key(ctx.date(json, DateField::Due)),
-        SortField::FirstDue => date_key(ctx.date(json, DateField::FirstDue)),
-        SortField::Snoozed => date_key(ctx.date(json, DateField::Snoozed)),
-        SortField::Start => date_key(ctx.date(json, DateField::Start)),
-        SortField::Created => date_key(ctx.date(json, DateField::Created)),
-        SortField::Updated => json.get("updated_at").and_then(Value::as_str).map_or(Key::Missing, |t| Key::Text(t.to_string())),
+        // Lists go in the order of the sidebar unless priority targets are given.
+        SortField::List if spec.targets.is_empty() => {
+            ctx.list_position(json).map_or(Key::Missing, |position| Key::Num(position as i64))
+        }
+        SortField::List => key_for(&ctx.lists_of(json), &spec.targets),
+        SortField::Label => key_for(&ctx.labels_of(json), &spec.targets),
+        SortField::Due => moment_key(ctx.date(json, DateField::Due)),
+        SortField::FirstDue => moment_key(ctx.date(json, DateField::FirstDue)),
+        SortField::Snoozed => moment_key(ctx.date(json, DateField::Snoozed)),
+        SortField::Start => moment_key(ctx.date(json, DateField::Start)),
+        SortField::Created => moment_key(ctx.date(json, DateField::Created)),
+        SortField::Modified => {
+            json.get("updated_at").and_then(Value::as_str).map_or(Key::Missing, |t| Key::Text(t.to_string()))
+        }
         SortField::Duration => number(NumField::Duration),
         SortField::SnoozeCount => number(NumField::SnoozeCount),
         SortField::IndentLevel => number(NumField::IndentLevel),
@@ -100,53 +110,96 @@ pub struct Group<'a> {
     pub tasks: Vec<&'a StoredTask>,
 }
 
-const NO_LIST: &str = "(no list)";
-const NO_LABEL: &str = "(no label)";
-const NO_DATE: &str = "(none)";
+/// Which group a task goes in, and where that group comes in the list of groups.
+struct Placement {
+    name: String,
+    /// The position among the targets, or after them all.
+    rank: usize,
+    none: bool,
+}
 
-fn group_names(field: GroupField, task: &StoredTask, ctx: &Context) -> Vec<String> {
-    let date = |field| {
-        vec![ctx.date(&task.json, field).map_or_else(|| NO_DATE.to_string(), |d| d.format("%Y-%m-%d").to_string())]
-    };
-    let or_default = |names: Vec<String>, default: &str| if names.is_empty() { vec![default.to_string()] } else { names };
-    match field {
-        GroupField::List => or_default(ctx.list_names(&task.json), NO_LIST),
-        GroupField::Label => or_default(ctx.label_names(&task.json), NO_LABEL),
-        GroupField::Due => date(DateField::Due),
-        GroupField::FirstDue => date(DateField::FirstDue),
-        GroupField::Snoozed => date(DateField::Snoozed),
-        GroupField::Start => date(DateField::Start),
-        GroupField::Created => date(DateField::Created),
+impl Placement {
+    fn none(rank: usize) -> Placement {
+        Placement { name: NONE_GROUP.to_string(), rank, none: true }
     }
 }
 
-/// Splits the tasks into groups, keeping their order within each. The `targets` groups come
-/// first in the order given, then the rest alphabetically (dates chronologically), then the
-/// group of tasks that have no value. A task with several lists or labels goes in only the
-/// best-ranked one, unless `duplicates` is on.
-fn group_tasks<'a>(
-    tasks: &[&'a StoredTask],
-    field: GroupField,
-    targets: &[String],
-    duplicates: bool,
-    ctx: &Context,
-) -> Vec<Group<'a>> {
-    let mut groups: Vec<Group<'a>> = Vec::new();
-    for &task in tasks {
-        let mut names = group_names(field, task, ctx);
-        names.sort_by_key(|name| (rank_of(name, targets), name.to_lowercase()));
-        if !duplicates {
-            names.truncate(1);
+fn date_placement(moment: Option<NaiveDateTime>) -> Placement {
+    match moment {
+        Some(moment) => Placement { name: moment.date().format("%Y-%m-%d").to_string(), rank: 0, none: false },
+        None => Placement::none(0),
+    }
+}
+
+/// The groups a task belongs in, for a field that names things (lists, labels, label groups).
+///
+/// With targets, the task goes in the first target it matches. If it matches none, it goes in
+/// "None", or, if the targets ended with `...rest`, in its own groups as if there were no
+/// targets. Without targets it goes in the first group alphabetically. `duplicates` puts it in
+/// every matching group instead of one.
+fn named_placements(items: Vec<Named>, spec: &GroupSpec, duplicates: bool) -> Vec<Placement> {
+    let mut items = items;
+    items.sort_by_key(|item| item.name.to_lowercase());
+
+    let mut placements: Vec<Placement> = Vec::new();
+    for (position, target) in spec.targets.iter().enumerate() {
+        if let Some(item) = items.iter().find(|item| item.is(target)) {
+            placements.push(Placement { name: item.name.clone(), rank: position, none: false });
         }
-        for name in names {
-            match groups.iter_mut().find(|g| g.name == name) {
-                Some(group) => group.tasks.push(task),
-                None => groups.push(Group { name, tasks: vec![task] }),
+    }
+    if placements.is_empty() {
+        if !spec.targets.is_empty() && !spec.rest {
+            return vec![Placement::none(spec.targets.len())];
+        }
+        placements = items
+            .iter()
+            .map(|item| Placement { name: item.name.clone(), rank: spec.targets.len(), none: false })
+            .collect();
+    }
+    if placements.is_empty() {
+        return vec![Placement::none(spec.targets.len())];
+    }
+    if !duplicates {
+        placements.truncate(1);
+    }
+    placements
+}
+
+fn placements(spec: &GroupSpec, task: &StoredTask, duplicates: bool, ctx: &Context) -> Vec<Placement> {
+    let json = &task.json;
+    let by = |field| date_placement(ctx.date(json, field));
+    match spec.field {
+        GroupField::List => named_placements(ctx.lists_of(json), spec, duplicates),
+        GroupField::Label => named_placements(ctx.labels_of(json), spec, duplicates),
+        GroupField::LabelGroup => named_placements(ctx.label_groups_of(json), spec, duplicates),
+        GroupField::Due => vec![by(DateField::Due)],
+        GroupField::FirstDue => vec![by(DateField::FirstDue)],
+        GroupField::Snoozed => vec![by(DateField::Snoozed)],
+        GroupField::Start => vec![by(DateField::Start)],
+        GroupField::DueOrStart => {
+            vec![date_placement(ctx.date(json, DateField::Due).or_else(|| ctx.date(json, DateField::Start)))]
+        }
+        GroupField::Created => vec![by(DateField::Created)],
+    }
+}
+
+/// Splits the tasks into groups, keeping their order within each. Target groups come first in
+/// the order given, then the others alphabetically (dates chronologically), then "None".
+fn group_tasks<'a>(tasks: &[&'a StoredTask], spec: &GroupSpec, duplicates: bool, ctx: &Context) -> Vec<Group<'a>> {
+    let mut groups: Vec<(Placement, Group<'a>)> = Vec::new();
+    for &task in tasks {
+        for placement in placements(spec, task, duplicates, ctx) {
+            match groups.iter_mut().find(|(p, g)| p.none == placement.none && g.name == placement.name) {
+                Some((_, group)) => group.tasks.push(task),
+                None => {
+                    let name = placement.name.clone();
+                    groups.push((placement, Group { name, tasks: vec![task] }));
+                }
             }
         }
     }
-    groups.sort_by_key(|g| (g.name.starts_with('('), rank_of(&g.name, targets), g.name.to_lowercase()));
-    groups
+    groups.sort_by_key(|(p, g)| (p.none, p.rank, g.name.to_lowercase()));
+    groups.into_iter().map(|(_, group)| group).collect()
 }
 
 fn single_line(value: &str) -> String {
@@ -164,7 +217,10 @@ fn truncate(value: &str, width: usize) -> String {
 fn row_cells(task: &StoredTask, ctx: &Context) -> [String; 4] {
     let title = task.json.get("title").and_then(Value::as_str).unwrap_or("");
     let title = if title.trim().is_empty() { "(untitled)" } else { title };
-    let due = ctx.date(&task.json, DateField::Due).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+    let due = ctx
+        .date(&task.json, DateField::Due)
+        .map(|moment| moment.date().format("%Y-%m-%d").to_string())
+        .unwrap_or_default();
     [
         single_line(title),
         single_line(&ctx.list_names(&task.json).join(", ")),
@@ -205,10 +261,7 @@ pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: b
         tasks.truncate(limit);
     }
 
-    let groups = query
-        .group
-        .as_ref()
-        .map(|spec| group_tasks(&tasks, spec.field, &spec.targets, query.duplicates, ctx));
+    let groups = query.group.as_ref().map(|spec| group_tasks(&tasks, spec, query.duplicates, ctx));
 
     if json {
         let value = match groups {
@@ -247,12 +300,15 @@ pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: b
 mod tests {
     use super::*;
     use crate::query::parse;
+    use chrono::NaiveDate;
 
-    fn today() -> NaiveDate {
-        NaiveDate::from_ymd_opt(2026, 10, 15).unwrap()
+    /// Thursday 15 October 2026, 10:30.
+    fn now() -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 10, 15).unwrap().and_hms_opt(10, 30, 0).unwrap()
     }
 
     fn context() -> Context {
+        // The lists are given in sidebar order: Work, Home, Misc.
         Context::new(
             &[
                 json!({"id": "l-work", "name": "Work"}),
@@ -260,11 +316,13 @@ mod tests {
                 json!({"id": "l-misc", "name": "Misc"}),
             ],
             &[
-                json!({"id": "x-high", "name": "High"}),
-                json!({"id": "x-med", "name": "Medium"}),
-                json!({"id": "x-low", "name": "Low"}),
+                json!({"id": "x-high", "name": "High", "group_name": "Severity", "group_id": "g-sev"}),
+                json!({"id": "x-med", "name": "Medium", "group_name": "Severity", "group_id": "g-sev"}),
+                json!({"id": "x-low", "name": "Low", "group_name": "Severity", "group_id": "g-sev"}),
+                json!({"id": "x-home", "name": "Chores", "group_name": "Errands", "group_id": "g-err"}),
+                json!({"id": "x-plain", "name": "Plain"}),
             ],
-            today(),
+            now(),
         )
     }
 
@@ -275,7 +333,7 @@ mod tests {
     }
 
     fn query(text: &str) -> Query {
-        parse(&[text.to_string()], today()).unwrap()
+        parse(&[text.to_string()], now()).unwrap()
     }
 
     fn ids(output: &str) -> Vec<String> {
@@ -288,6 +346,17 @@ mod tests {
 
     fn run(text: &str, tasks: &[StoredTask]) -> String {
         render(&query(text), tasks.iter().collect(), &context(), false)
+    }
+
+    fn json_ids(text: &str, tasks: &[StoredTask]) -> Vec<String> {
+        let out = render(&query(text), tasks.iter().collect(), &context(), true);
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        parsed.as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// The group headings, such as "Work (2)".
+    fn headings(output: &str) -> Vec<String> {
+        output.lines().filter(|l| !l.starts_with("Task") && l.ends_with(')') && !l.is_empty()).map(str::to_string).collect()
     }
 
     #[test]
@@ -316,6 +385,20 @@ mod tests {
     }
 
     #[test]
+    fn sort_by_due_start_snoozed_first_due_and_created() {
+        let tasks = [
+            task("a", json!({"timeless_due_at": "2026-10-20", "timeless_starts_at": "2026-10-03", "timeless_snoozed_until": "2026-10-25", "created_at": "2026-09-02T12:00:00Z"})),
+            task("b", json!({"timeless_due_at": "2026-10-22", "timeless_starts_at": "2026-10-01", "created_at": "2026-09-01T12:00:00Z"})),
+        ];
+        // Effective due: a is snoozed to the 25th, so it is after b (the 22nd).
+        assert_eq!(json_ids("sort:due", &tasks), vec!["b", "a"]);
+        assert_eq!(json_ids("sort:first-due", &tasks), vec!["a", "b"]);
+        assert_eq!(json_ids("sort:start", &tasks), vec!["b", "a"]);
+        assert_eq!(json_ids("sort:snoozed", &tasks), vec!["a", "b"]);
+        assert_eq!(json_ids("sort:created", &tasks), vec!["b", "a"]);
+    }
+
+    #[test]
     fn several_sorts_apply_in_order_and_ties_keep_the_incoming_order() {
         let tasks = [
             task("a", json!({"duration_minutes": 30, "title": "Same"})),
@@ -323,16 +406,8 @@ mod tests {
             task("c", json!({"duration_minutes": 30, "title": "Alpha"})),
             task("d", json!({"duration_minutes": 30, "title": "Same"})),
         ];
-        // Title first, then duration descending, then incoming order (a before d).
         assert_eq!(json_ids("sort:title sort-desc:duration", &tasks), vec!["c", "a", "d", "b"]);
-        // Only duration: a, c, d tie and keep their incoming order.
         assert_eq!(json_ids("sort:duration", &tasks), vec!["b", "a", "c", "d"]);
-    }
-
-    fn json_ids(text: &str, tasks: &[StoredTask]) -> Vec<String> {
-        let out = render(&query(text), tasks.iter().collect(), &context(), true);
-        let parsed: Value = serde_json::from_str(&out).unwrap();
-        parsed.as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap().to_string()).collect()
     }
 
     #[test]
@@ -350,6 +425,12 @@ mod tests {
     }
 
     #[test]
+    fn sort_targets_may_be_ids() {
+        let tasks = [task("high", json!({"label_ids": ["x-high"]})), task("low", json!({"label_ids": ["x-low"]}))];
+        assert_eq!(ids(&run("sort:label:x-low|x-high", &tasks)), vec!["low", "high"]);
+    }
+
+    #[test]
     fn labels_not_among_the_targets_come_after_those_that_are() {
         let tasks = [
             task("low", json!({"label_ids": ["x-low"]})),
@@ -360,12 +441,32 @@ mod tests {
     }
 
     #[test]
-    fn sort_by_list_updated_and_numbers() {
+    fn sort_by_list_follows_the_sidebar_order_not_the_alphabet() {
         let tasks = [
-            task("w", json!({"list_id": "l-work", "updated_at": "2026-03-01T00:00:00Z", "snooze_count": 3})),
-            task("h", json!({"list_id": "l-home", "updated_at": "2026-01-01T00:00:00Z", "snooze_count": 1})),
+            task("misc", json!({"list_id": "l-misc"})),
+            task("home", json!({"list_id": "l-home"})),
+            task("none", json!({})),
+            task("work", json!({"list_id": "l-work"})),
         ];
-        assert_eq!(ids(&run("sort:list", &tasks)), vec!["h", "w"]);
+        // Sidebar order is Work, Home, Misc; alphabetical would put Home first.
+        assert_eq!(ids(&run("sort:list", &tasks)), vec!["work", "home", "misc", "none"]);
+        assert_eq!(ids(&run("sort-desc:list", &tasks)), vec!["misc", "home", "work", "none"]);
+    }
+
+    #[test]
+    fn sort_by_list_with_targets_uses_them_first() {
+        let tasks = [task("work", json!({"list_id": "l-work"})), task("misc", json!({"list_id": "l-misc"}))];
+        assert_eq!(ids(&run("sort:list:Misc", &tasks)), vec!["misc", "work"]);
+    }
+
+    #[test]
+    fn sort_by_modified_numbers_and_the_updated_alias() {
+        let tasks = [
+            task("w", json!({"updated_at": "2026-03-01T00:00:00Z", "snooze_count": 3})),
+            task("h", json!({"updated_at": "2026-01-01T00:00:00Z", "snooze_count": 1})),
+        ];
+        assert_eq!(ids(&run("sort:modified", &tasks)), vec!["h", "w"]);
+        assert_eq!(ids(&run("sort-desc:modified", &tasks)), vec!["w", "h"]);
         assert_eq!(ids(&run("sort:updated", &tasks)), vec!["h", "w"]);
         assert_eq!(ids(&run("sort-desc:snooze-count", &tasks)), vec!["w", "h"]);
         assert_eq!(ids(&run("sort:indent-level", &tasks)), vec!["w", "h"], "both missing: order kept");
@@ -380,21 +481,64 @@ mod tests {
     }
 
     #[test]
-    fn grouping_by_list_orders_targets_first_then_alphabetical_then_none() {
+    fn grouping_by_list_with_targets_orders_them_first_then_alphabetical_then_none() {
         let tasks = [
             task("n", json!({})),
             task("m", json!({"list_id": "l-misc"})),
             task("w", json!({"list_id": "l-work"})),
             task("h", json!({"list_id": "l-home"})),
         ];
-        let out = run("group:list:Work", &tasks);
-        let headings: Vec<&str> = out.lines().filter(|l| l.ends_with(" (1)")).collect();
-        assert_eq!(headings, vec!["Work (1)", "Home (1)", "Misc (1)", "(no list) (1)"]);
+        // Without ...rest the lists that aren't targets collapse into "None".
+        assert_eq!(headings(&run("group:list:Home|Work", &tasks)), vec!["Home (1)", "Work (1)", "None (2)"]);
+        // With ...rest they keep their own groups, after the targets.
+        assert_eq!(
+            headings(&run("group:list:Work|...rest", &tasks)),
+            vec!["Work (1)", "Home (1)", "Misc (1)", "None (1)"]
+        );
+    }
+
+    #[test]
+    fn grouping_without_targets_is_alphabetical_with_none_last() {
+        let tasks = [
+            task("n", json!({})),
+            task("w", json!({"list_id": "l-work"})),
+            task("h", json!({"list_id": "l-home"})),
+        ];
+        assert_eq!(headings(&run("group:list", &tasks)), vec!["Home (1)", "Work (1)", "None (1)"]);
+    }
+
+    #[test]
+    fn group_targets_can_be_ids_and_quoted_names() {
+        let tasks = [task("w", json!({"list_id": "l-work"})), task("h", json!({"list_id": "l-home"}))];
+        assert_eq!(headings(&run("group:list:l-home|l-work", &tasks)), vec!["Home (1)", "Work (1)"]);
+        let lists = Context::new(
+            &[json!({"id": "a", "name": "After lunch"}), json!({"id": "b", "name": "Morning"})],
+            &[],
+            now(),
+        );
+        let t = [task("1", json!({"list_id": "a"})), task("2", json!({"list_id": "b"}))];
+        let out = render(&query("group:list:Morning|\"After lunch\""), t.iter().collect(), &lists, false);
+        assert_eq!(headings(&out), vec!["Morning (1)", "After lunch (1)"]);
+    }
+
+    #[test]
+    fn the_guides_label_example_puts_unlisted_labels_in_none() {
+        let tasks = [
+            task("p0", json!({"label_ids": ["x-high"]})),
+            task("other", json!({"label_ids": ["x-plain"]})),
+            task("p1", json!({"label_ids": ["x-med"]})),
+        ];
+        let out = run("group:label:Medium|High", &tasks);
+        assert_eq!(headings(&out), vec!["Medium (1)", "High (1)", "None (1)"]);
     }
 
     #[test]
     fn groups_are_separated_by_a_blank_line_and_counted() {
-        let tasks = [task("a", json!({"list_id": "l-work"})), task("b", json!({"list_id": "l-work"})), task("c", json!({"list_id": "l-home"}))];
+        let tasks = [
+            task("a", json!({"list_id": "l-work"})),
+            task("b", json!({"list_id": "l-work"})),
+            task("c", json!({"list_id": "l-home"})),
+        ];
         let out = run("group:list", &tasks);
         assert_eq!(out, format!("Home (1)\n{}\n\nWork (2)\n{}\n{}", row("c", "Home"), row("a", "Work"), row("b", "Work")));
     }
@@ -410,21 +554,43 @@ mod tests {
             task("a", json!({"list_id": "l-work"})),
             task("z", json!({"list_id": "l-home"})),
         ];
-        let out = run("group:list sort:title", &tasks);
-        assert_eq!(ids(&out), vec!["z", "a", "b"]);
+        assert_eq!(ids(&run("group:list sort:title", &tasks)), vec!["z", "a", "b"]);
     }
 
     #[test]
-    fn grouping_by_label_places_a_multi_label_task_once_unless_duplicates_are_on() {
-        let tasks = [task("both", json!({"label_ids": ["x-low", "x-high"]})), task("none", json!({}))];
-        let once = run("group:label:High|Medium|Low", &tasks);
-        assert_eq!(once.lines().filter(|l| l.starts_with("Task both")).count(), 1);
-        assert!(once.contains("High (1)") && !once.contains("Low ("));
-        assert!(once.contains("(no label) (1)"));
+    fn a_task_with_several_labels_is_grouped_under_the_first_alphabetically() {
+        let tasks = [task("both", json!({"label_ids": ["x-low", "x-high"]}))];
+        let out = run("group:label", &tasks);
+        assert_eq!(headings(&out), vec!["High (1)"]);
+    }
 
-        let twice = run("group:label enable:duplicates", &tasks);
+    #[test]
+    fn with_targets_a_task_goes_under_the_first_target_it_matches_unless_duplicates_are_on() {
+        let tasks = [task("both", json!({"label_ids": ["x-low", "x-high"]})), task("none", json!({}))];
+        let once = run("group:label:Low|High", &tasks);
+        assert_eq!(headings(&once), vec!["Low (1)", "None (1)"]);
+
+        let twice = run("group:label:Low|High enable:duplicates", &tasks);
+        assert_eq!(headings(&twice), vec!["Low (1)", "High (1)", "None (1)"]);
         assert_eq!(twice.lines().filter(|l| l.starts_with("Task both")).count(), 2);
-        assert!(twice.contains("High (1)") && twice.contains("Low (1)"));
+
+        let all = run("group:label enable:duplicates", &tasks);
+        assert_eq!(headings(&all), vec!["High (1)", "Low (1)", "None (1)"]);
+    }
+
+    #[test]
+    fn grouping_by_label_group_uses_the_first_group_alphabetically() {
+        let tasks = [
+            task("both", json!({"label_ids": ["x-low", "x-home"]})),
+            task("sev", json!({"label_ids": ["x-high"]})),
+            task("plain", json!({"label_ids": ["x-plain"]})),
+            task("nolabel", json!({})),
+        ];
+        let out = run("group:label-group", &tasks);
+        // "Errands" sorts before "Severity".
+        assert_eq!(headings(&out), vec!["Errands (1)", "Severity (1)", "None (2)"]);
+        assert_eq!(headings(&run("group:label-group:Severity", &tasks)), vec!["Severity (2)", "None (2)"]);
+        assert_eq!(headings(&run("group:label-group:g-err", &tasks)), vec!["Errands (1)", "None (3)"]);
     }
 
     #[test]
@@ -434,9 +600,30 @@ mod tests {
             task("dec", json!({"timeless_due_at": "2026-12-01"})),
             task("oct", json!({"timeless_due_at": "2026-10-20"})),
         ];
-        let out = run("group:due", &tasks);
-        let headings: Vec<&str> = out.lines().filter(|l| l.ends_with(" (1)")).collect();
-        assert_eq!(headings, vec!["2026-10-20 (1)", "2026-12-01 (1)", "(none) (1)"]);
+        assert_eq!(headings(&run("group:due", &tasks)), vec!["2026-10-20 (1)", "2026-12-01 (1)", "None (1)"]);
+    }
+
+    #[test]
+    fn grouping_by_start_and_created_uses_the_calendar_date() {
+        let tasks = [
+            task("a", json!({"timeless_starts_at": "2026-11-02", "created_at": "2026-09-05T12:00:00Z"})),
+            task("b", json!({"timeless_starts_at": "2026-11-01", "created_at": "2026-09-05T13:00:00Z"})),
+        ];
+        assert_eq!(headings(&run("group:start", &tasks)), vec!["2026-11-01 (1)", "2026-11-02 (1)"]);
+        assert_eq!(headings(&run("group:created", &tasks)), vec!["2026-09-05 (2)"]);
+    }
+
+    #[test]
+    fn grouping_by_due_or_start_uses_the_due_date_or_else_the_start_date() {
+        let tasks = [
+            task("due", json!({"timeless_due_at": "2026-10-20", "timeless_starts_at": "2026-10-01"})),
+            task("start", json!({"timeless_starts_at": "2026-10-10"})),
+            task("neither", json!({})),
+        ];
+        assert_eq!(
+            headings(&run("group:due-or-start", &tasks)),
+            vec!["2026-10-10 (1)", "2026-10-20 (1)", "None (1)"]
+        );
     }
 
     #[test]
@@ -446,8 +633,20 @@ mod tests {
             task("b", json!({"list_id": "l-home"})),
             task("c", json!({"list_id": "l-work"})),
         ];
-        let out = run("group:list limit:2", &tasks);
-        assert_eq!(ids(&out).len(), 2);
+        assert_eq!(ids(&run("group:list limit:2", &tasks)).len(), 2);
+    }
+
+    #[test]
+    fn the_guides_today_smart_list_shape() {
+        // due:today group:list sort:due
+        let tasks = [
+            task("late", json!({"list_id": "l-work", "due_at": "2026-10-15T14:00:00Z"})),
+            task("early", json!({"list_id": "l-work", "due_at": "2026-10-15T09:00:00Z"})),
+            task("home", json!({"list_id": "l-home", "due_at": "2026-10-15T12:00:00Z"})),
+        ];
+        let out = run("group:list sort:due", &tasks);
+        assert_eq!(headings(&out), vec!["Home (1)", "Work (2)"]);
+        assert_eq!(ids(&out), vec!["home", "early", "late"]);
     }
 
     #[test]
@@ -459,10 +658,8 @@ mod tests {
         let out = run("", &tasks);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);
-        let expected_header = format!("{:<80}  {:<12}  {:<10}  LABELS", "TITLE", "LIST", "DUE");
-        assert_eq!(lines[0], expected_header);
-        let expected_row = format!("{:<80}  {:<12}  {:<10}  High, Low", "Pay rent", "Home", "2026-10-31");
-        assert_eq!(lines[1], expected_row);
+        assert_eq!(lines[0], format!("{:<80}  {:<12}  {:<10}  LABELS", "TITLE", "LIST", "DUE"));
+        assert_eq!(lines[1], format!("{:<80}  {:<12}  {:<10}  High, Low", "Pay rent", "Home", "2026-10-31"));
     }
 
     #[test]
@@ -474,8 +671,7 @@ mod tests {
         let title_cell: String = line.chars().take(80).collect();
         assert_eq!(title_cell, format!("{}…", "x".repeat(79)));
         assert_eq!(line.chars().nth(80), Some(' '));
-        // A list name over 12 characters.
-        let ctx = Context::new(&[json!({"id": "l", "name": "A very long list name"})], &[], today());
+        let ctx = Context::new(&[json!({"id": "l", "name": "A very long list name"})], &[], now());
         let t = task("2", json!({"list_id": "l"}));
         let rendered = render(&query(""), vec![&t], &ctx, false);
         assert!(rendered.lines().nth(1).unwrap().contains("A very long…"), "{rendered}");
@@ -515,6 +711,6 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed[0]["group"], "Work");
         assert_eq!(parsed[0]["tasks"][0]["id"], "a");
-        assert_eq!(parsed[1]["group"], "(no list)");
+        assert_eq!(parsed[1]["group"], "None");
     }
 }

@@ -212,48 +212,73 @@ The database is `$XDG_DATA_HOME/godspeed-cli/cache.sqlite3`. It needs `GODSPEED_
 
 ## Search
 
-`godspeed-cli search` finds tasks in the local copy made by [`refresh`](#refresh). It works offline and needs no token. Run `godspeed-cli search --help` for the full syntax.
+`godspeed-cli search` finds tasks in the local copy made by [`refresh`](#refresh). It works offline and needs no token. It follows [Godspeed's search operators guide](https://godspeedapp.com/guides/search-operators); run `godspeed-cli search --help` for the full syntax.
 
 ```bash
-godspeed-cli search invoice
-godspeed-cli search 'due:20261031 label:Low'
-godspeed-cli search 'title:"tax return" list:Admin'
-godspeed-cli search '(label:Low | label:Medium) due<=2026-10-31'
-godspeed-cli search 'has:notes duration>=30m group:list sort-desc:due limit:20'
-godspeed-cli search 'is:complete label:Low sort-desc:created'
+godspeed-cli search research pdf
+godspeed-cli search 'feature & (bug | error)'
+godspeed-cli search 'research -"budget meeting"'
+godspeed-cli search 'research in:"engineering q2"'
+godspeed-cli search 'due<=3h'
+godspeed-cli search 'snoozed>="Oct 14th 12am" & snoozed<="Oct 14th 1159pm"'
+godspeed-cli search 'due:today group:list sort:due'
+godspeed-cli search 'duration>="1 hour and 30 minutes" has:notes limit:10'
 godspeed-cli search -label:Low --json
 ```
 
-Only incomplete tasks are searched unless the query contains `is:complete` (and the copy was made with `refresh --include-completed`). With no query, every incomplete task is listed.
+Only incomplete tasks are searched. `is:uncleared` and `is:complete` bring in completed tasks, and they are only in the local copy if you refreshed with `--include-completed`. With no query, every incomplete task is listed.
 
-**Quote the query.** The arguments are joined with spaces into one query, so `search '(a | b) !c'` works but an unquoted `|` or `(` is taken by the shell. A phrase needs its own quotes inside the query: `search '"tax return"'`; `search "tax return"` means *tax* and *return*.
+**Quote the query.** The arguments are joined with spaces into one query, so `search '(a | b) !c'` works but an unquoted `|` or `(` is taken by the shell. A phrase needs its own quotes inside the query: `search '"tax return"'`; `search "tax return"` means *tax* and *return*, in any order.
+
+### The operators
 
 | Syntax | Meaning |
 | --- | --- |
-| `word`, `"a phrase"` | Found (case-insensitively) in the title, notes or attachment names |
-| `a b`, `a & b`, `a \| b`, `!a`, `-a`, `( )` | And, or, not, grouping. `\|` binds loosest, then and, then not |
-| `title:` `notes:` `attachment:` | Just that field |
-| `list:` `folder:` `in:` `label:` `label-group:` | List name, list path, label name, label group |
-| `due:` `first-due:` `snoozed:` `start:` `created:` | A date: `today`, `tomorrow`, `YYYYMMDD`, `YYYY-MM-DD`, `3d`, `-2d`, `2w`, or `week`, `next-week`, `month`, `year` |
-| `due<` `due<=` `due>` `due>=` `due=` | Compare with a single date, for example `due<=3d` |
-| `duration<30m` `duration>=1.5h` `snooze-count=2` `indent-level>0` | Numbers; durations in minutes or with `m` / `h` |
-| `has:notes` `has:attachment` `has:label` `has:repeat` `has:due` `has:snooze` `has:start` `has:due-time` `has:start-time` `has:bookmark` `has:email` `has:duration` `has:any` | The task has that |
-| `is:complete` `is:available` `is:uncleared` | State |
-| `sort:` `sort-asc:` `sort-desc:` | `title`, `list`, `label`, `due`, `first-due`, `snoozed`, `start`, `created`, `updated`, `duration`, `snooze-count`, `indent-level`. Repeat to sort by several; `sort:label:High\|Medium\|Low` puts those first |
-| `group:` | `list`, `label`, `due`, `first-due`, `snoozed`, `start`, `created`; `group:list:Work\|Home` puts those first. A task with several labels appears under one unless `enable:duplicates` is given |
+| `word` | Ignores case and word order; found in the title, notes or attachment names |
+| `"exact phrase"` | The exact characters, spaces included |
+| `a & b`, `a b`, `a \| b`, `!a`, `-a`, `( )` | And, or, not, grouping (nestable). `\|` binds loosest, then and, then not. Not works on every operator |
+| `title:` `notes:` `attachment:` | Just that field (attachments by file name only) |
+| `list:` | Tasks in a list |
+| `folder:` | Tasks in a list that sits in a folder with that name |
+| `in:` | Tasks in a list or a folder |
+| `label:` `label-group:` | Tasks with a label, or a label in that group |
+| `due` `first-due` `snoozed` `start` `created` | Dates, with `<` `<=` `>` `>=` and a date query (below), or `:today` `:tomorrow` `:week` `:next-week` `:month` `:year` |
+| `duration` `snooze-count` `indent-level` | Numbers, with `<` `<=` `>` `>=` `=`. Durations like `15m`, `1.5h`, `"1 hour and 30 minutes"` |
+| `has:notes` `has:attachment` `has:label` `has:repeat` `has:due` `has:snooze` `has:start` `has:due-time` `has:start-time` `has:bookmark` `has:email` `has:duration` | The task has that. `has:any` matches every task |
+| `is:available` | No start date, or a start date in the past |
+| `is:uncleared` | Completed but not yet cleared (never an incomplete task) |
+| `sort:` `sort-asc:` `sort-desc:` | `due` `first-due` `snoozed` `start` `created` `modified` `title` `label` `duration` `snooze-count` `list`. Ascending by default; repeat to sort by several |
+| `group:` | `list` `label` `label-group` `due` `start` `due-or-start` `created` |
 | `limit:N` | At most N tasks, after sorting |
+| `enable:duplicates` `disable:duplicates` | Whether a task with several labels, label groups or lists appears under each when grouping |
+| `enable:nested` `disable:nested` | Accepted; results are always a flat list |
 
-Details worth knowing:
+Names and ids: `list:`, `folder:`, `in:`, `label:` and `label-group:` take part of a name, or an id (the whole id). Quote names that contain spaces: `in:"engineering q2"`.
 
-- A task that has no value for a date or number never matches a test on it, so `due<today` does not match undated tasks (and `!due<today` does).
-- `due` is the later of the due date and the snooze date; `first-due` ignores snoozes. `is:available` means there is no start date or snooze still in the future.
-- Weeks run Monday to Sunday. `24h` means one day: hours are rounded down to whole days. Periods (`week`, `month`, ...) work with `:` and `=` only, not `<` or `>`.
-- Something that looks like `operator:value` but isn't an operator, such as `10:30`, is searched for as plain text. A misspelt operator is therefore a plain word rather than an error, but a known operator with a bad value (`due:someday`, `has:wings`) is an error.
-- `enable:nested` and `disable:nested` are rejected, because the local copy doesn't keep Godspeed's sub-task layout.
+Group and sort targets: `group:label:p0|p1|p2` makes those groups in that order, and tasks with none of them go in a group called `None`. `group:list:Morning|"After lunch"` quotes names with spaces, and ids work too. End the targets with `...rest` (`group:label:Bug|Feature|...rest`) and tasks matching no target are grouped normally instead of going into `None`. `sort:label:High|Medium|Low` and `sort:list:...` put those first. With several labels or label groups, the first alphabetically is used for grouping.
+
+### Dates
+
+Date queries are read the way Godspeed's date picker reads them, and quoted if they contain spaces:
+
+| You can write | Meaning |
+| --- | --- |
+| `3h`, `30m`, `2d`, `1w`, `-2d`, `1h30m` | That long from now (`3h ago`, `-3h` for the past) |
+| `in 3 days`, `2 hours ago` | The same, in words |
+| `today`, `tomorrow`, `yesterday` | That day |
+| `friday`, `next friday` | The next Friday, counting today (`next` skips today) |
+| `Oct 14th`, `14 oct`, `oct 14 2027`, `2026-10-31`, `20261031` | That date. With no year, the closest one to today |
+| `12am`, `3:30pm`, `1159pm`, `14:30`, `noon`, `midnight` | A time, today unless a date is given: `"Oct 14th 12am"`, `tomorrow 3pm` |
+
+A date with no time means the whole day: `due<=2026-10-31` includes tasks due on the 31st, and `due>2026-10-31` does not. With a time, or a relative amount like `3h`, it is that exact moment. A task's date that has no time counts as the start of its day, so `due<=3h` also finds tasks that are overdue. `due:DATE` means that calendar day; `due:today`, `:week`, `:month` and so on cover the whole period (weeks run Monday to Sunday). The period words only work after `:`, not after `<` or `>`.
+
+`due` is the effective due date: the later of the due date and the snooze date. `first-due` is the due date alone. A task that has no value for a date or number never matches a test on it, so `due<today` doesn't match undated tasks (and `!due<today` does).
+
+Something that looks like `operator:value` but isn't an operator, such as `10:30`, is searched for as plain text. A misspelt operator is therefore a plain word rather than an error, but a known operator with a bad value (`due:someday`, `has:wings`) is an error.
 
 ### Output
 
-The default output is a table with a header row. Titles are cut to 80 characters, lists to 12, labels to 20, ending in `…`, and the due date column shows the `due` date. With `group:`, each group gets a heading with a count and no header row. `--json` prints the full task records, with `list_names` and `label_names` added, as an array (or an array of `{"group", "tasks"}` objects when grouping). Messages such as `No matching tasks.` and the age note go to stderr, so stdout holds only results.
+The default output is a table with a header row. Titles are cut to 80 characters, lists to 12, labels to 20, ending in `…`, and the due date column shows the effective due date. With `group:`, each group gets a heading with a count and no header row. `--json` prints the full task records, with `list_names` and `label_names` added, as an array (or an array of `{"group", "tasks"}` objects when grouping). Messages such as `No matching tasks.` and the age note go to stderr, so stdout holds only results.
 
 | Exit status | Meaning |
 | --- | --- |
@@ -263,11 +288,18 @@ The default output is a table with a header row. Titles are cut to 80 characters
 
 If the local copy is a day or more old, a note says so on stderr.
 
+### What differs from Godspeed itself
+
+- It searches a copy, so results are only as fresh as the last `refresh`.
+- `is:complete` is an addition, so that completed tasks in the copy can be found.
+- Results are a flat list: `enable:nested` and `disable:nested` are accepted but change nothing.
+- The default order, with no `sort:`, is most recently updated first.
+
 ### Task fields it relies on
 
-Search reads these fields from each task's JSON: `title`, `notes`, `attachments`, `list_id` (and `list_ordinals`), `label_ids`, `due_at`, `timeless_due_at`, `snoozed_until`, `timeless_snoozed_until`, `starts_at`, `timeless_starts_at`, `created_at`, `updated_at`, `duration_minutes`, `snooze_count`, `indent_level`, `repeat` / `recurrence` / `repeat_rule`, `bookmarked_at`, `email` / `email_id` / `source_email`, `cleared_at` / `is_cleared`. Lists use `name` and `path`; labels use `name` and `group_name`.
+Search reads these fields from each task's JSON: `title`, `notes`, `attachments`, `list_id` (and `list_ordinals`), `label_ids`, `due_at`, `timeless_due_at`, `snoozed_until`, `timeless_snoozed_until`, `starts_at`, `timeless_starts_at`, `created_at`, `updated_at`, `duration_minutes`, `snooze_count`, `indent_level`, `repeat` / `recurrence` / `repeat_rule`, `bookmarked_at`, `email` / `email_id` / `source_email`, `cleared_at` / `is_cleared`. Lists use `name`, and `path` or `parent_id` for folders; labels use `name`, and `group_name` / `group_id` for label groups. Lists are ordered as the API returned them, which is taken to be the sidebar order.
 
-`title`, `notes`, `list_id`, `label_ids`, `timeless_due_at` and `duration_minutes` are the fields that task creation sends. The others were taken from another Godspeed client and have **not been checked against a real account**. If an operator never matches, look at what the API returned for one of your tasks (`sqlite3 ~/.local/share/godspeed-cli/cache.sqlite3 'select json from tasks limit 1'`) and compare the field names. They are all read in `src/eval.rs`.
+`title`, `notes`, `list_id`, `label_ids`, `timeless_due_at` and `duration_minutes` are the fields that task creation sends. The others were taken from another Godspeed client and have **not been checked against a real account**; in particular, how folders and label groups are represented is a guess. If an operator never matches, look at what the API returned for one of your tasks (`sqlite3 ~/.local/share/godspeed-cli/cache.sqlite3 'select json from tasks limit 1'`) and compare the field names. They are all read in `src/eval.rs`.
 
 ## Offline Cache
 

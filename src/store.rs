@@ -108,7 +108,9 @@ impl Store {
             for value in values {
                 if let Some(id) = string_field(value, "id") {
                     tx.execute(
-                        &format!("INSERT OR REPLACE INTO {table} (id, json) VALUES (?1, ?2)"),
+                        // The API repeats lists and labels on every page. Keeping the first copy
+                        // keeps them in the order the API gave them, which is the sidebar order.
+                        &format!("INSERT OR IGNORE INTO {table} (id, json) VALUES (?1, ?2)"),
                         params![id, serde_json::to_string(value)?],
                     )?;
                 }
@@ -141,11 +143,11 @@ impl Store {
     }
 
     pub fn lists(&self) -> Result<Vec<Value>> {
-        self.json_rows("SELECT json FROM lists ORDER BY id")
+        self.json_rows("SELECT json FROM lists ORDER BY rowid")
     }
 
     pub fn labels(&self) -> Result<Vec<Value>> {
-        self.json_rows("SELECT json FROM labels ORDER BY id")
+        self.json_rows("SELECT json FROM labels ORDER BY rowid")
     }
 
     fn json_rows(&self, sql: &str) -> Result<Vec<Value>> {
@@ -303,6 +305,24 @@ mod tests {
         assert_eq!(store.lists().unwrap(), vec![json!({"id": "l1", "name": "Inbox"})]);
         assert_eq!(store.labels().unwrap(), vec![json!({"id": "x1", "name": "Low"})]);
         assert_eq!(store.refreshed_at().unwrap().as_deref(), Some("2026-10-15T00:00:00Z"));
+    }
+
+    #[test]
+    fn lists_keep_the_order_the_api_gave_them_even_when_later_pages_repeat_only_some() {
+        let mut store = memory();
+        let list = |id: &str| json!({"id": id, "name": id});
+        let snapshot = Snapshot {
+            tasks: vec![],
+            // Page one: a, b, c. Page two repeats just a. Page three repeats b.
+            lists: vec![list("a"), list("b"), list("c"), list("a"), list("b")],
+            labels: vec![],
+        };
+
+        store.replace_all(&snapshot, "t").unwrap();
+
+        let names: Vec<String> =
+            store.lists().unwrap().iter().map(|l| l["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
     }
 
     #[test]

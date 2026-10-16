@@ -61,7 +61,8 @@ fn load(store: &Store, include_completed: bool) -> Result<Loaded, Box<dyn std::e
 
 pub fn run_search(args: &[String]) -> ExitCode {
     let args = parse_args(args);
-    let query = match query::parse(&args.query, Local::now().date_naive()) {
+    let now = Local::now().naive_local();
+    let query = match query::parse(&args.query, now) {
         Ok(query) => query,
         Err(message) => {
             eprintln!("Error: {message}");
@@ -89,7 +90,7 @@ pub fn run_search(args: &[String]) -> ExitCode {
         eprintln!("Note: the local copy has no completed tasks; run `godspeed-cli refresh --include-completed` to add them.");
     }
 
-    let context = Context::new(&loaded.lists, &loaded.labels, Local::now().date_naive());
+    let context = Context::new(&loaded.lists, &loaded.labels, now);
     let matched: Vec<&StoredTask> = loaded.tasks.iter().filter(|task| context.matches(&query.expr, task)).collect();
     if matched.is_empty() && !args.json {
         eprintln!("No matching tasks.");

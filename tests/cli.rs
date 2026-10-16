@@ -1098,7 +1098,7 @@ fn sorting_limiting_and_grouping() {
     let by_due = search(&sandbox, &["sort-desc:due", "--json"]);
     let limited = search(&sandbox, &["sort:title", "limit:2", "--json"]);
     let by_label = search(&sandbox, &["sort:label:Urgent|Low", "--json"]);
-    let grouped = search(&sandbox, &["group:list:Home", "sort:title"]);
+    let grouped = search(&sandbox, &["group:list:Home|...rest", "sort:title"]);
 
     assert_eq!(ids_in_json(&by_due), vec!["t2", "t1", "t3"]);
     assert_eq!(ids_in_json(&limited), vec!["t3", "t1"]);
@@ -1144,7 +1144,6 @@ fn an_invalid_query_is_a_usage_error_with_a_helpful_message() {
         ("(label:low", "Unclosed parenthesis"),
         ("due:someday", "Invalid date"),
         ("sort:colour", "Unknown sort field"),
-        ("enable:nested", "nested isn't supported"),
         ("title:\"open", "Unclosed quote"),
         ("limit:many", "Invalid limit"),
     ] {
@@ -1196,7 +1195,7 @@ fn search_help_documents_the_syntax_and_needs_nothing() {
 
     assert_eq!(code(&output), 0);
     let text = stdout(&output);
-    for needle in ["MATCHING:", "DATES", "has:due-time", "group:FIELD", "EXIT STATUS"] {
+    for needle in ["MATCHING:", "DATES", "has:due-time", "GROUPING:", "SORTING:", "EXIT STATUS"] {
         assert!(text.contains(needle), "{needle}");
     }
 }
@@ -1211,4 +1210,132 @@ fn a_task_can_still_be_created_whose_text_starts_with_search() {
 
     let titles: Vec<String> = api.posted_tasks().iter().map(|t| t["title"].as_str().unwrap().to_string()).collect();
     assert_eq!(titles, vec!["search the attic", "search the garage"]);
+}
+
+// ---- the operators guide ----
+
+#[test]
+fn group_targets_without_rest_put_every_other_list_in_none() {
+    let sandbox = refreshed("search-group-none", false);
+
+    let output = search(&sandbox, &["group:list:Home"]);
+
+    let text = stdout(&output);
+    let headings: Vec<&str> = text.lines().filter(|l| l.ends_with(')')).collect();
+    assert_eq!(headings, vec!["Home (2)", "None (1)"], "{text}");
+}
+
+#[test]
+fn the_nested_flags_are_accepted_and_change_nothing() {
+    let sandbox = refreshed("search-nested", false);
+
+    let plain = search(&sandbox, &["milk"]);
+    let enabled = search(&sandbox, &["milk", "enable:nested"]);
+    let disabled = search(&sandbox, &["milk", "disable:nested"]);
+
+    assert_eq!(code(&enabled), 0, "{}", stderr(&enabled));
+    assert_eq!(code(&disabled), 0, "{}", stderr(&disabled));
+    assert_eq!(stdout(&plain), stdout(&enabled));
+    assert_eq!(stdout(&plain), stdout(&disabled));
+}
+
+#[test]
+fn has_any_matches_every_task() {
+    let sandbox = refreshed("search-has-any", false);
+
+    let output = search(&sandbox, &["has:any", "--json"]);
+
+    assert_eq!(ids_in_json(&output), vec!["t1", "t2", "t3"]);
+}
+
+#[test]
+fn lists_and_labels_can_be_searched_by_id() {
+    let sandbox = refreshed("search-ids", false);
+
+    let list = search(&sandbox, &["in:list-work", "--json"]);
+    let label = search(&sandbox, &["label:label-urgent", "--json"]);
+    let group = search(&sandbox, &["label-group:priority", "--json"]);
+
+    assert_eq!(ids_in_json(&list), vec!["t2"]);
+    assert_eq!(ids_in_json(&label), vec!["t1"]);
+    assert_eq!(ids_in_json(&group), vec!["t1", "t2"]);
+}
+
+#[test]
+fn dates_are_read_the_way_the_date_picker_reads_them() {
+    let sandbox = refreshed("search-dates", false);
+
+    // Quoted, with spaces; a time; a month name; a relative amount; a keyword.
+    let quoted = search(&sandbox, &["due>=\"Oct 31st 12am\" & due<=\"Oct 31st 1159pm\"", "--json"]);
+    let named_month = search(&sandbox, &["due:\"nov 15\"", "--json"]);
+    let far_future = search(&sandbox, &["due<=\"in 100000 days\"", "--json"]);
+    let nothing_within_an_hour = search(&sandbox, &["due>=now & due<=1h", "--json"]);
+    let by_year = search(&sandbox, &["due:20261115", "--json"]);
+
+    assert_eq!(ids_in_json(&quoted), vec!["t1"]);
+    assert_eq!(ids_in_json(&named_month), vec!["t2"]);
+    assert_eq!(ids_in_json(&far_future), vec!["t1", "t2"]);
+    assert!(ids_in_json(&nothing_within_an_hour).is_empty());
+    assert_eq!(ids_in_json(&by_year), vec!["t2"]);
+}
+
+#[test]
+fn durations_accept_words_as_well_as_suffixes() {
+    let sandbox = refreshed("search-duration-words", false);
+
+    let words = search(&sandbox, &["duration>=\"1 hour and 30 minutes\"", "--json"]);
+    let short = search(&sandbox, &["duration<15m", "--json"]);
+    let exact = search(&sandbox, &["duration=30", "--json"]);
+
+    assert_eq!(ids_in_json(&words), vec!["t2"]);
+    assert!(ids_in_json(&short).is_empty());
+    assert_eq!(ids_in_json(&exact), vec!["t1"]);
+}
+
+#[test]
+fn is_uncleared_brings_in_completed_tasks_without_is_complete() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("search-uncleared");
+    api.queue_page_with(incomplete_tasks(), search_lists(), search_labels());
+    api.queue_page_with(
+        vec![
+            json!({"id": "c1", "title": "Done not cleared", "updated_at": "2026-02-01T00:00:00Z"}),
+            json!({"id": "c2", "title": "Done and cleared", "cleared_at": "2026-02-02T00:00:00Z", "updated_at": "2026-02-02T00:00:00Z"}),
+        ],
+        search_lists(),
+        search_labels(),
+    );
+    sandbox.run(&api, &["refresh", "--include-completed"]);
+
+    let uncleared = search(&sandbox, &["is:uncleared", "--json"]);
+    let not_uncleared = search(&sandbox, &["!is:uncleared", "--json"]);
+
+    assert_eq!(ids_in_json(&uncleared), vec!["c1"]);
+    assert!(!ids_in_json(&not_uncleared).contains(&"c1".to_string()));
+    assert!(ids_in_json(&not_uncleared).contains(&"t1".to_string()));
+}
+
+#[test]
+fn the_guides_today_smart_list_runs() {
+    let sandbox = refreshed("search-today-list", false);
+
+    let output = search(&sandbox, &["due:today group:list sort:due"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(stdout(&output).is_empty(), "nothing in the sample data is due today");
+    assert!(stderr(&output).contains("No matching tasks."));
+}
+
+#[test]
+fn sort_by_modified_and_list_in_sidebar_order() {
+    let sandbox = refreshed("search-modified", false);
+
+    let modified = search(&sandbox, &["sort:modified", "--json"]);
+    let modified_desc = search(&sandbox, &["sort-desc:modified", "--json"]);
+    // The lists came as Work Projects then Home, so work comes first even though Home sorts first.
+    let by_list = search(&sandbox, &["sort:list", "--json"]);
+
+    assert_eq!(ids_in_json(&modified), vec!["t3", "t2", "t1"]);
+    assert_eq!(ids_in_json(&modified_desc), vec!["t1", "t2", "t3"]);
+    assert_eq!(ids_in_json(&by_list), vec!["t2", "t1", "t3"]);
 }
