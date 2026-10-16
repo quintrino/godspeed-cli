@@ -229,29 +229,43 @@ fn row_cells(task: &StoredTask, ctx: &Context) -> [String; 4] {
     ]
 }
 
-fn format_line(cells: &[String; 4]) -> String {
-    let line: Vec<String> = cells
-        .iter()
-        .zip(WIDTHS)
-        .map(|(cell, width)| format!("{:<width$}", truncate(cell, width)))
-        .collect();
-    line.join("  ").trim_end().to_string()
-}
-
 /// ANSI escape codes for red text and for going back to normal.
 const RED: &str = "\x1b[31m";
 const RESET: &str = "\x1b[0m";
 
-/// The rows of the table. With `color`, an overdue task's whole row is red. The codes go round
-/// the finished row, after the columns are padded, so they can't change how the columns line up.
-fn table_rows(tasks: &[&StoredTask], ctx: &Context, color: bool) -> Vec<String> {
-    tasks
+/// Which column holds the due date.
+const DUE_COLUMN: usize = 2;
+
+/// One line of the table: each cell cut to its column's width and padded to it. With `red_due`,
+/// the due date (and only the date, not the padding after it) is red. The codes are added after
+/// the cell is cut, and the padding is worked out from the text without them, so they can't
+/// change how the columns line up.
+fn format_line(cells: &[String; 4], red_due: bool) -> String {
+    let line: Vec<String> = cells
         .iter()
-        .map(|task| {
-            let line = format_line(&row_cells(task, ctx));
-            if color && ctx.is_overdue(task) { format!("{RED}{line}{RESET}") } else { line }
+        .zip(WIDTHS)
+        .enumerate()
+        .map(|(column, (cell, width))| {
+            let text = truncate(cell, width);
+            let padding = " ".repeat(width.saturating_sub(text.chars().count()));
+            if red_due && column == DUE_COLUMN && !text.is_empty() {
+                format!("{RED}{text}{RESET}{padding}")
+            } else {
+                format!("{text}{padding}")
+            }
         })
-        .collect()
+        .collect();
+    line.join("  ").trim_end().to_string()
+}
+
+/// The column labels.
+fn header_line() -> String {
+    format_line(&["TITLE", "LIST", "DUE", "LABELS"].map(String::from), false)
+}
+
+/// The rows of the table. With `color`, the due date of an overdue task is red.
+fn table_rows(tasks: &[&StoredTask], ctx: &Context, color: bool) -> Vec<String> {
+    tasks.iter().map(|task| format_line(&row_cells(task, ctx), color && ctx.is_overdue(task))).collect()
 }
 
 fn task_json(task: &StoredTask, ctx: &Context) -> Value {
@@ -274,16 +288,18 @@ fn limit_groups(groups: &mut Vec<Group<'_>>, limit: usize) {
     groups.retain(|group| !group.tasks.is_empty());
 }
 
-/// Sorts, groups and limits `tasks` as the query asks, and formats the result. The table has
-/// a header row; with `group:` each group gets a heading and a count instead. In JSON, the
-/// result is an array of tasks, or of `{"group", "tasks"}` objects when grouping. Every task
-/// also gets `list_names` and `label_names`.
+/// Sorts, groups and limits `tasks` as the query asks, and formats the result. The table starts
+/// with a row of column labels; with `group:` that is followed by each group, which has a heading
+/// with its name and count and then its rows. Nothing is printed when there are no results. In
+/// JSON, the result is an array of tasks, or of `{"group", "tasks"}` objects when grouping.
+/// Every task also gets `list_names` and `label_names`.
 ///
 /// `limit:` counts tasks in the order they are shown. With `group:` that means the first groups
 /// are kept, so a group listed first (`group:label:Eternal|...`) is never cut to make room for a
 /// later one, however the tasks inside it sort.
 ///
-/// With `color`, overdue tasks are shown in red in the table. JSON is never coloured.
+/// With `color`, the due date of an overdue task is shown in red in the table. JSON is never
+/// coloured.
 pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: bool, color: bool) -> String {
     sort_tasks(&mut tasks, &query.sorts, ctx);
 
@@ -308,19 +324,22 @@ pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: b
     }
 
     match groups {
-        Some(groups) => groups
-            .iter()
-            .map(|g| {
-                let mut lines = vec![format!("{} ({})", g.name, g.tasks.len())];
-                lines.extend(table_rows(&g.tasks, ctx, color));
-                lines.join("\n")
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n"),
+        Some(groups) if groups.is_empty() => String::new(),
+        Some(groups) => {
+            let body = groups
+                .iter()
+                .map(|g| {
+                    let mut lines = vec![format!("{} ({})", g.name, g.tasks.len())];
+                    lines.extend(table_rows(&g.tasks, ctx, color));
+                    lines.join("\n")
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            format!("{}\n{body}", header_line())
+        }
         None if tasks.is_empty() => String::new(),
         None => {
-            let header = format_line(&["TITLE", "LIST", "DUE", "LABELS"].map(String::from));
-            let mut lines = vec![header];
+            let mut lines = vec![header_line()];
             lines.extend(table_rows(&tasks, ctx, color));
             lines.join("\n")
         }
@@ -571,11 +590,14 @@ mod tests {
             task("c", json!({"list_id": "l-home"})),
         ];
         let out = run("group:list", &tasks);
-        assert_eq!(out, format!("Home (1)\n{}\n\nWork (2)\n{}\n{}", row("c", "Home"), row("a", "Work"), row("b", "Work")));
+        assert_eq!(
+            out,
+            format!("{}\nHome (1)\n{}\n\nWork (2)\n{}\n{}", header_line(), row("c", "Home"), row("a", "Work"), row("b", "Work"))
+        );
     }
 
     fn row(id: &str, list: &str) -> String {
-        format_line(&[format!("Task {id}"), list.to_string(), String::new(), String::new()])
+        format_line(&[format!("Task {id}"), list.to_string(), String::new(), String::new()], false)
     }
 
     #[test]
@@ -750,15 +772,21 @@ mod tests {
         let out = coloured_run("", &tasks);
 
         for line in out.lines() {
-            let red = line.starts_with(RED) && line.ends_with(RESET);
-            let overdue = line.starts_with(&format!("{RED}Task overdue")) || line.starts_with(&format!("{RED}Task yesterday"));
-            assert_eq!(red, overdue, "{line:?}");
-            if !red {
+            let overdue = line.starts_with("Task overdue") || line.starts_with("Task yesterday");
+            assert_eq!(line.contains(RED), overdue, "{line:?}");
+            if !overdue {
                 assert!(!line.contains('\x1b'), "{line:?}");
             }
         }
         assert_eq!(out.matches(RED).count(), 2, "only the two overdue rows: {out}");
-        assert!(out.lines().next().unwrap().starts_with("TITLE"), "the header is plain");
+        assert_eq!(out.matches(RESET).count(), 2);
+        let overdue_row = out.lines().find(|l| l.starts_with("Task overdue")).unwrap();
+        let yesterday_row = out.lines().find(|l| l.starts_with("Task yesterday")).unwrap();
+        // Red is just the date: it starts after the title and list, and stops straight after it.
+        assert!(overdue_row.contains(&format!("{RED}2020-01-01{RESET}")), "{overdue_row:?}");
+        assert!(yesterday_row.contains(&format!("{RED}2026-10-14{RESET}")), "{yesterday_row:?}");
+        assert!(!overdue_row.starts_with(RED), "the title is not red: {overdue_row:?}");
+        assert!(out.lines().next().unwrap().starts_with("TITLE") && !out.lines().next().unwrap().contains('\x1b'), "the header is plain");
     }
 
     #[test]
@@ -789,11 +817,11 @@ mod tests {
         let done = out.lines().find(|l| l.contains("Task done")).unwrap();
         let open = out.lines().find(|l| l.contains("Task open")).unwrap();
         assert!(!done.contains('\x1b'), "{done:?}");
-        assert!(open.starts_with(RED), "{open:?}");
+        assert!(open.contains(&format!("{RED}2020-01-01{RESET}")), "{open:?}");
     }
 
     #[test]
-    fn grouped_output_colours_the_rows_but_not_the_headings() {
+    fn grouped_output_colours_overdue_dates_but_not_the_headings_or_the_header() {
         let tasks = [
             task("a", json!({"list_id": "l-work", "timeless_due_at": "2020-01-01"})),
             task("b", json!({"list_id": "l-work", "timeless_due_at": "2099-01-01"})),
@@ -825,6 +853,83 @@ mod tests {
         let out = coloured_run("", &[snoozed]);
 
         assert!(!out.contains('\x1b'), "{out}");
+    }
+
+    #[test]
+    fn grouped_output_starts_with_the_column_labels_once() {
+        let tasks = [
+            task("a", json!({"list_id": "l-work", "timeless_due_at": "2026-12-01"})),
+            task("b", json!({"list_id": "l-home"})),
+        ];
+
+        let out = run("group:list", &tasks);
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], header_line());
+        assert!(lines[0].starts_with("TITLE") && lines[0].contains("LIST") && lines[0].contains("DUE") && lines[0].ends_with("LABELS"));
+        assert_eq!(out.matches("TITLE").count(), 1, "only once, not under every group: {out}");
+        assert_eq!(lines[1], "Home (1)", "the first group follows the header: {out}");
+    }
+
+    #[test]
+    fn the_header_lines_up_with_the_rows_of_every_group() {
+        let tasks = [
+            task("a", json!({"list_id": "l-work", "timeless_due_at": "2026-12-01", "label_ids": ["x-low"]})),
+            task("b", json!({"list_id": "l-home", "timeless_due_at": "2026-11-01", "label_ids": ["x-high"]})),
+        ];
+        let out = run("group:list", &tasks);
+        let header = out.lines().next().unwrap();
+        let column = |line: &str, words: &[&str]| words.iter().filter_map(|w| line.find(w)).min().unwrap();
+
+        let rows: Vec<&str> = out.lines().filter(|l| l.starts_with("Task")).collect();
+        assert_eq!(rows.len(), 2);
+        for line in rows {
+            assert_eq!(column(header, &["LIST"]), column(line, &["Home", "Work"]), "{line}");
+            assert_eq!(column(header, &["DUE"]), column(line, &["2026"]), "{line}");
+            assert_eq!(column(header, &["LABELS"]), column(line, &["Low", "High"]), "{line}");
+        }
+    }
+
+    #[test]
+    fn grouped_output_with_no_results_prints_nothing_at_all() {
+        assert_eq!(run("group:list", &[]), "");
+        let tasks = [task("a", json!({"list_id": "l-work"}))];
+        assert_eq!(run("group:list limit:0", &tasks), "", "even when the limit leaves nothing");
+    }
+
+    #[test]
+    fn ungrouped_output_has_the_same_header() {
+        let out = run("", &[task("a", json!({}))]);
+        assert_eq!(out.lines().next().unwrap(), header_line());
+    }
+
+    #[test]
+    fn only_the_date_is_red_and_the_padding_after_it_is_not() {
+        let t = task("a", json!({"timeless_due_at": "2020-01-01", "label_ids": ["x-low"]}));
+
+        let out = coloured_run("", &[t]);
+
+        let row = out.lines().nth(1).unwrap();
+        let (before, rest) = row.split_once(RED).unwrap();
+        let (red, after) = rest.split_once(RESET).unwrap();
+        assert_eq!(red, "2020-01-01", "just the date is inside the colour");
+        assert!(!before.contains('\x1b') && !after.contains('\x1b'));
+        assert!(before.starts_with("Task a"), "the title comes before it, uncoloured: {before:?}");
+        assert!(after.starts_with("  Low"), "the columns carry on straight after: {after:?}");
+        assert_eq!(uncoloured(row), run("", &[task("a", json!({"timeless_due_at": "2020-01-01", "label_ids": ["x-low"]}))]).lines().nth(1).unwrap());
+    }
+
+    #[test]
+    fn the_red_date_does_not_move_the_columns_that_follow_it() {
+        let labelled = task("a", json!({"timeless_due_at": "2020-01-01", "label_ids": ["x-low"]}));
+        let unlabelled = task("b", json!({"timeless_due_at": "2020-01-02"}));
+
+        let out = coloured_run("", &[labelled, unlabelled]);
+
+        let plain = uncoloured(&out);
+        let label_column = plain.lines().nth(1).unwrap().find("Low").unwrap();
+        assert_eq!(label_column, plain.lines().next().unwrap().find("LABELS").unwrap());
+        assert!(!plain.lines().nth(2).unwrap().ends_with(' '), "no trailing spaces on a row with no labels");
     }
 
     #[test]

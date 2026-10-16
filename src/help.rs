@@ -170,7 +170,7 @@ OPTIONS:
                          a note on stderr.
     --max-age AGE        Update the copy first if it is older than AGE, such as 30m, 6h, "2 days"
                          or 0 (always). "never" turns off a max_age from the settings file.
-    --color WHEN         Show overdue tasks in red in the table. WHEN is auto (the default: only
+    --color WHEN         Show the due date of overdue tasks in red in the table. WHEN is auto (the default: only
                          on a terminal, and not if NO_COLOR is set or TERM is dumb), always (for
                          `| less -R`, and overriding NO_COLOR) or never. Only the table is
                          coloured, never JSON. A task is overdue when its effective due date (the
@@ -240,6 +240,7 @@ mod tests {
             "group:due-or-start", "group:label-group", "modified", "sidebar", "None", "sort:label:High|Medium|Low",
             "\"exact phrase\"", "in 3 days", "\"Oct 14th 12am\"", "--refresh", "--max-age AGE", "--color WHEN", "NO_COLOR", "overdue",
         ] {
+            assert!(!text.is_empty(), "a blank entry would always pass");
             assert!(SEARCH_HELP.contains(text), "{text} is not in the search help");
         }
     }
@@ -247,10 +248,11 @@ mod tests {
     #[test]
     fn the_help_text_covers_the_commands_the_options_and_the_task_syntax() {
         for text in [
-            "--help", "--version", "GODSPEED_TOKEN", ".label", "", "~duration", ":date", "n: text", "add",
+            "--help", "--version", "GODSPEED_TOKEN", ".label", "@list", "~duration", ":date", "n: text", "add",
             "EXIT STATUS", "refresh", "--include-completed", "search [--json]", "--full", "--max-age",
             "SETTINGS FILE", "completions", "godspeed-cli add \"buy milk\"", "There are no other commands",
         ] {
+            assert!(!text.is_empty(), "a blank entry would always pass");
             assert!(HELP.contains(text), "{text} is not in the help");
         }
     }
@@ -270,6 +272,7 @@ mod tests {
             "eval \"$(godspeed-cli completions zsh)\"", "godspeed-cli completions fish | source", "compinit",
             "list:", "in:", "label:", "due:", "has:", "WorkProjects", "offline",
         ] {
+            assert!(!text.is_empty(), "a blank entry would always pass");
             assert!(COMPLETIONS_HELP.contains(text), "{text} is not in the completions help");
         }
     }

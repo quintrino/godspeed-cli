@@ -2515,9 +2515,11 @@ fn overdue_tasks_are_red_with_color_always_and_nothing_else_is() {
     let output = search(&sandbox, &["--color", "always"]);
 
     let text = stdout(&output);
-    let red_rows: Vec<&str> = text.lines().filter(|l| l.starts_with(RED)).collect();
+    let red_rows: Vec<&str> = text.lines().filter(|l| l.contains(RED)).collect();
     assert_eq!(red_rows.len(), 1, "{text:?}");
-    assert!(red_rows[0].contains("Overdue task") && red_rows[0].ends_with(RESET), "{:?}", red_rows[0]);
+    assert!(red_rows[0].starts_with("Overdue task"), "the title is not coloured: {:?}", red_rows[0]);
+    assert!(red_rows[0].contains(&format!("{RED}2020-01-01{RESET}")), "just the date is red: {:?}", red_rows[0]);
+    assert_eq!(text.matches(RED).count(), 1);
     for plain in ["Future task", "Undated task", "Snoozed task"] {
         let line = text.lines().find(|l| l.contains(plain)).unwrap();
         assert!(!line.contains('\x1b'), "{plain}: {line:?}");
@@ -2573,7 +2575,7 @@ fn json_is_never_coloured_even_with_color_always() {
 }
 
 #[test]
-fn grouped_output_colours_overdue_rows_but_not_the_group_headings() {
+fn grouped_output_colours_overdue_dates_but_not_the_group_headings() {
     let sandbox = overdue_copy("color-grouped");
 
     let output = search(&sandbox, &["group:due", "--color=always"]);
@@ -2621,4 +2623,70 @@ fn bash_completes_the_color_flag_and_its_values() {
     assert_eq!(bash_complete(&sandbox, "godspeed-cli search --color a", &[g, "search", "--color", "a"]), vec!["auto", "always"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli search --color n", &[g, "search", "--color", "n"]), vec!["never"]);
     assert!(bash_complete(&sandbox, "godspeed-cli add --c", &[g, "add", "--c"]).is_empty(), "add has no --color");
+}
+
+// ---- the header row ----
+
+#[test]
+fn search_results_have_a_header_row_grouped_or_not() {
+    let sandbox = overdue_copy("header-rows");
+
+    let plain = search(&sandbox, &[]);
+    let grouped = search(&sandbox, &["group:due"]);
+    let sorted_grouped = search(&sandbox, &["group:due", "sort:title", "limit:2"]);
+
+    for (name, output) in [("plain", &plain), ("grouped", &grouped), ("sorted and limited", &sorted_grouped)] {
+        let text = stdout(output);
+        let first = text.lines().next().unwrap();
+        assert!(
+            first.starts_with("TITLE") && first.contains("LIST") && first.contains("DUE") && first.ends_with("LABELS"),
+            "{name}: {first:?}"
+        );
+        assert_eq!(text.matches("TITLE").count(), 1, "{name}: the header comes once: {text}");
+    }
+}
+
+#[test]
+fn the_header_comes_before_the_first_group_and_not_between_groups() {
+    let sandbox = overdue_copy("header-grouped");
+
+    let text = stdout(&search(&sandbox, &["group:due"]));
+
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines[0].starts_with("TITLE"), "{text}");
+    assert!(lines[1].ends_with(')'), "a group heading follows the header: {text}");
+    assert!(lines.iter().skip(1).all(|l| !l.starts_with("TITLE")), "{text}");
+}
+
+#[test]
+fn the_columns_of_the_header_and_the_rows_line_up() {
+    let sandbox = overdue_copy("header-aligned");
+
+    let text = stdout(&search(&sandbox, &["--color=always"]));
+
+    let plain: Vec<String> = text.lines().map(|l| l.replace(RED, "").replace(RESET, "")).collect();
+    let due_column = plain[0].find("DUE").unwrap();
+    let overdue = plain.iter().find(|l| l.starts_with("Overdue task")).unwrap();
+    assert_eq!(overdue.find("2020-01-01"), Some(due_column), "{overdue:?} under {:?}", plain[0]);
+}
+
+#[test]
+fn no_results_print_no_header() {
+    let sandbox = overdue_copy("header-none");
+
+    let plain = search(&sandbox, &["zzzznothing"]);
+    let grouped = search(&sandbox, &["zzzznothing", "group:due"]);
+
+    assert!(stdout(&plain).is_empty());
+    assert!(stdout(&grouped).is_empty());
+}
+
+#[test]
+fn json_has_no_header_row() {
+    let sandbox = overdue_copy("header-json");
+
+    let output = search(&sandbox, &["--json"]);
+
+    assert!(!stdout(&output).contains("TITLE"));
+    assert!(serde_json::from_str::<Value>(&stdout(&output)).unwrap().is_array());
 }

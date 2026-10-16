@@ -362,7 +362,7 @@ Something that looks like `operator:value` but isn't an operator, such as `10:30
 
 ### Output
 
-The default output is a table with a header row. Titles are cut to 80 characters, lists to 12, labels to 20, ending in `…`, and the due date column shows the effective due date. With `group:`, each group gets a heading with a count and no header row. `--json` prints the full task records, with `list_names` and `label_names` added, as an array (or an array of `{"group", "tasks"}` objects when grouping). Messages such as `No matching tasks.` and the age note go to stderr, so stdout holds only results.
+The output is a table that starts with a header row of column labels (`TITLE`, `LIST`, `DUE`, `LABELS`). Titles are cut to 80 characters, lists to 12, labels to 20, ending in `…`, and the due date column shows the effective due date. With `group:`, the header comes once, at the top, followed by each group: a heading with the group's name and a count, then its rows, with a blank line between groups. Nothing, not even the header, is printed when there are no results. `--json` prints the full task records, with `list_names` and `label_names` added, as an array (or an array of `{"group", "tasks"}` objects when grouping). Messages such as `No matching tasks.` and the age note go to stderr, so stdout holds only results.
 
 | Exit status | Meaning |
 | --- | --- |
@@ -374,7 +374,7 @@ If the local copy is a day or more old, a note says so on stderr.
 
 ### Colour
 
-In a terminal, **overdue tasks are shown in red**: the whole row of the table, so they stand out in a long list. Nothing else is coloured: not the header, the group headings, or tasks that aren't overdue.
+In a terminal, **the due date of an overdue task is shown in red**, so overdue tasks stand out in a long list. Only the date is coloured: not the rest of the row, the header, the group headings, or the dates of tasks that aren't overdue.
 
 A task is overdue when its effective due date has passed. That is the later of its due date and its snooze date, the same as `due` in a search. So:
 
