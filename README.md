@@ -374,12 +374,13 @@ If the local copy is a day or more old, a note says so on stderr.
 
 ### Colour
 
-In a terminal, two things are coloured:
+In a terminal, three things are coloured:
 
 - **The due date of an overdue task is red**, so overdue tasks stand out in a long list. Only the date: not the rest of the row, or the dates of tasks that aren't overdue.
-- **The header row is bold cyan**, so the column labels stand apart from the rows. It is a different colour from the red of an overdue date, and it is the same in grouped output, where it comes once at the top.
+- **The list is yellow**, in every row that has one (the whole cell, as shown, so a task in several lists has them all in yellow). A task with no list has nothing to colour.
+- **The header row is bold cyan**, so the column labels stand apart from the rows. It is the same in grouped output, where it comes once at the top.
 
-Nothing else is coloured, including the group headings.
+Each has its own colour (red, yellow, cyan), so an overdue task's row shows a yellow list and a red date. Nothing else is coloured, including the title, the labels and the group headings.
 
 A task is overdue when its effective due date has passed. That is the later of its due date and its snooze date, the same as `due` in a search. So:
 
@@ -396,7 +397,7 @@ A task is overdue when its effective due date has passed. That is the later of i
 | `always` | Always colour, even into a pipe or a file, and even if `NO_COLOR` is set. Use it with a pager: `godspeed-cli search 'due<=today' --color always \| less -R` |
 | `never` | Never colour |
 
-JSON (`--json`) is never coloured. The colour is added around the header and around each date, after the columns are laid out, so the text and the columns are exactly the same with or without it. No results print nothing at all, not even a coloured header.
+JSON (`--json`) is never coloured. The colour is added around the header and around each list and date, after the columns are laid out, so the text and the columns are exactly the same with or without it. No results print nothing at all, not even a coloured header.
 
 ### What differs from Godspeed itself
 

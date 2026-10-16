@@ -2485,6 +2485,7 @@ fn the_negations_after_the_or_only_apply_to_the_right_hand_side() {
 // ---- overdue tasks in colour ----
 
 const RED: &str = "\x1b[31m";
+const YELLOW: &str = "\x1b[33m";
 const HEADER: &str = "\x1b[1;36m";
 const RESET: &str = "\x1b[0m";
 
@@ -2552,7 +2553,7 @@ fn colour_only_adds_the_codes_and_never_changes_the_text() {
     let coloured = stdout(&search(&sandbox, &["--color=always"]));
     let plain = stdout(&search(&sandbox, &["--color=never"]));
 
-    assert_eq!(coloured.replace(RED, "").replace(HEADER, "").replace(RESET, ""), plain);
+    assert_eq!(coloured.replace(RED, "").replace(YELLOW, "").replace(HEADER, "").replace(RESET, ""), plain);
 }
 
 #[test]
@@ -2668,7 +2669,8 @@ fn the_columns_of_the_header_and_the_rows_line_up() {
 
     let text = stdout(&search(&sandbox, &["--color=always"]));
 
-    let plain: Vec<String> = text.lines().map(|l| l.replace(RED, "").replace(HEADER, "").replace(RESET, "")).collect();
+    let plain: Vec<String> =
+        text.lines().map(|l| l.replace(RED, "").replace(YELLOW, "").replace(HEADER, "").replace(RESET, "")).collect();
     let due_column = plain[0].find("DUE").unwrap();
     let overdue = plain.iter().find(|l| l.starts_with("Overdue task")).unwrap();
     assert_eq!(overdue.find("2020-01-01"), Some(due_column), "{overdue:?} under {:?}", plain[0]);
@@ -2752,4 +2754,115 @@ fn json_has_no_colour_even_for_the_header_case() {
     let output = search(&sandbox, &["--json", "--color", "always"]);
 
     assert!(!stdout(&output).contains('\x1b'));
+}
+
+// ---- the list in yellow ----
+
+/// A copy whose tasks are in lists: an overdue one in "Work", a future one in "Home",
+/// one with no list, and one with a long list name.
+fn listed_copy(name: &str) -> Sandbox {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new(name);
+    api.queue_page_with(
+        vec![
+            json!({"id": "w", "title": "Work task", "list_id": "list-work", "timeless_due_at": "2020-01-01",
+                   "label_ids": ["label-low"], "updated_at": "2026-03-04T00:00:00Z"}),
+            json!({"id": "h", "title": "Home task", "list_id": "list-home", "timeless_due_at": "2099-01-01",
+                   "updated_at": "2026-03-03T00:00:00Z"}),
+            json!({"id": "n", "title": "No list task", "updated_at": "2026-03-02T00:00:00Z"}),
+            json!({"id": "l", "title": "Long list task", "list_id": "list-long", "updated_at": "2026-03-01T00:00:00Z"}),
+        ],
+        json!([
+            {"id": "list-work", "name": "Work"},
+            {"id": "list-home", "name": "Home"},
+            {"id": "list-long", "name": "A very long list name"},
+        ]),
+        search_labels(),
+    );
+    let output = sandbox.run(&api, &["refresh"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    sandbox
+}
+
+#[test]
+fn the_list_is_yellow_with_color_always_and_only_the_list() {
+    let sandbox = listed_copy("yellow-list");
+
+    let text = stdout(&search(&sandbox, &["--color", "always"]));
+
+    let work = text.lines().find(|l| l.starts_with("Work task")).unwrap();
+    assert!(work.contains(&format!("{YELLOW}Work{RESET}")), "{work:?}");
+    assert!(work.contains(&format!("{RED}2020-01-01{RESET}")), "the overdue date is still red: {work:?}");
+    assert!(work.starts_with("Work task") && !work.starts_with('\x1b'), "the title is plain");
+    let home = text.lines().find(|l| l.starts_with("Home task")).unwrap();
+    assert!(home.contains(&format!("{YELLOW}Home{RESET}")) && !home.contains(RED), "{home:?}");
+    let no_list = text.lines().find(|l| l.starts_with("No list task")).unwrap();
+    assert!(!no_list.contains('\x1b'), "no list, nothing coloured: {no_list:?}");
+    let first = text.lines().next().unwrap();
+    assert!(first.starts_with(HEADER) && !first.contains(YELLOW), "the header stays cyan: {first:?}");
+}
+
+#[test]
+fn a_long_list_name_is_cut_and_then_coloured() {
+    let sandbox = listed_copy("yellow-long-list");
+
+    let text = stdout(&search(&sandbox, &["--color", "always"]));
+
+    let long = text.lines().find(|l| l.starts_with("Long list task")).unwrap();
+    assert!(long.contains(&format!("{YELLOW}A very long…{RESET}")), "{long:?}");
+}
+
+#[test]
+fn the_list_is_not_yellow_without_colour() {
+    let sandbox = listed_copy("yellow-off");
+    let no_color = sandbox.run_with_env(None, None, &["search"], None, &[("NO_COLOR", "1")]);
+
+    for output in [search(&sandbox, &[]), search(&sandbox, &["--color", "never"]), no_color, search(&sandbox, &["group:list"])] {
+        assert!(!stdout(&output).contains('\x1b'), "{:?}", stdout(&output));
+        assert!(stdout(&output).contains("Work"));
+    }
+}
+
+#[test]
+fn colour_only_adds_codes_so_the_text_is_the_same_with_the_list_coloured() {
+    let sandbox = listed_copy("yellow-same-text");
+    let strip = |text: String| text.replace(RED, "").replace(YELLOW, "").replace(HEADER, "").replace(RESET, "");
+
+    for args in [&[][..], &["group:list"], &["group:due", "sort:title"]] {
+        let mut coloured_args = args.to_vec();
+        coloured_args.extend(["--color", "always"]);
+        let mut plain_args = args.to_vec();
+        plain_args.extend(["--color", "never"]);
+        assert_eq!(strip(stdout(&search(&sandbox, &coloured_args))), stdout(&search(&sandbox, &plain_args)), "{args:?}");
+    }
+}
+
+#[test]
+fn grouped_by_list_the_headings_are_plain_and_each_row_has_a_yellow_list() {
+    let sandbox = listed_copy("yellow-grouped");
+
+    let text = stdout(&search(&sandbox, &["group:list", "--color", "always"]));
+
+    let headings: Vec<&str> = text.lines().filter(|l| l.ends_with(')') && !l.starts_with("Task")).collect();
+    assert!(headings.len() >= 3, "{text}");
+    assert!(headings.iter().all(|h| !h.contains('\x1b')), "{headings:?}");
+    assert_eq!(text.matches(YELLOW).count(), 3, "one per task that is in a list: {text:?}");
+}
+
+#[test]
+fn json_has_no_yellow_either() {
+    let sandbox = listed_copy("yellow-json");
+
+    let output = search(&sandbox, &["--json", "--color", "always"]);
+
+    assert!(!stdout(&output).contains('\x1b'));
+}
+
+#[test]
+fn search_help_says_the_list_is_yellow() {
+    let sandbox = Sandbox::new("yellow-help");
+
+    let text = stdout(&search(&sandbox, &["--help"]));
+
+    assert!(text.contains("yellow"), "{text}");
 }

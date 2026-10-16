@@ -229,19 +229,27 @@ fn row_cells(task: &StoredTask, ctx: &Context) -> [String; 4] {
     ]
 }
 
-/// ANSI escape codes: red text, bold cyan text, and going back to normal.
+/// ANSI escape codes: red, yellow and bold cyan text, and going back to normal.
 const RED: &str = "\x1b[31m";
+const YELLOW: &str = "\x1b[33m";
 const HEADER: &str = "\x1b[1;36m";
 const RESET: &str = "\x1b[0m";
 
-/// Which column holds the due date.
+/// The columns of the table that are coloured.
+const LIST_COLUMN: usize = 1;
 const DUE_COLUMN: usize = 2;
 
-/// One line of the table: each cell cut to its column's width and padded to it. With `red_due`,
-/// the due date (and only the date, not the padding after it) is red. The codes are added after
-/// the cell is cut, and the padding is worked out from the text without them, so they can't
-/// change how the columns line up.
-fn format_line(cells: &[String; 4], red_due: bool) -> String {
+/// The colour of the text in each column of a line, or none.
+type Styles = [Option<&'static str>; 4];
+
+/// No colour in any column.
+const PLAIN: Styles = [None; 4];
+
+/// One line of the table: each cell cut to its column's width and padded to it. A column with a
+/// style has its text (and only the text, not the padding after it) in that colour. The codes are
+/// added after the cell is cut, and the padding is worked out from the text without them, so
+/// they can't change how the columns line up. An empty cell gets no codes.
+fn format_line(cells: &[String; 4], styles: &Styles) -> String {
     let line: Vec<String> = cells
         .iter()
         .zip(WIDTHS)
@@ -249,10 +257,9 @@ fn format_line(cells: &[String; 4], red_due: bool) -> String {
         .map(|(column, (cell, width))| {
             let text = truncate(cell, width);
             let padding = " ".repeat(width.saturating_sub(text.chars().count()));
-            if red_due && column == DUE_COLUMN && !text.is_empty() {
-                format!("{RED}{text}{RESET}{padding}")
-            } else {
-                format!("{text}{padding}")
+            match styles[column] {
+                Some(style) if !text.is_empty() => format!("{style}{text}{RESET}{padding}"),
+                _ => format!("{text}{padding}"),
             }
         })
         .collect();
@@ -262,13 +269,27 @@ fn format_line(cells: &[String; 4], red_due: bool) -> String {
 /// The column labels. With `color` they are bold cyan, so they stand apart from the rows (and
 /// from the red of an overdue date).
 fn header_line(color: bool) -> String {
-    let line = format_line(&["TITLE", "LIST", "DUE", "LABELS"].map(String::from), false);
+    let line = format_line(&["TITLE", "LIST", "DUE", "LABELS"].map(String::from), &PLAIN);
     if color { format!("{HEADER}{line}{RESET}") } else { line }
 }
 
-/// The rows of the table. With `color`, the due date of an overdue task is red.
+/// The colours of one row. With `color`, the list is yellow, and the due date is red if the task
+/// is overdue. Everything else is plain.
+fn row_styles(task: &StoredTask, ctx: &Context, color: bool) -> Styles {
+    if !color {
+        return PLAIN;
+    }
+    let mut styles = PLAIN;
+    styles[LIST_COLUMN] = Some(YELLOW);
+    if ctx.is_overdue(task) {
+        styles[DUE_COLUMN] = Some(RED);
+    }
+    styles
+}
+
+/// The rows of the table, coloured if `color` (see [`row_styles`]).
 fn table_rows(tasks: &[&StoredTask], ctx: &Context, color: bool) -> Vec<String> {
-    tasks.iter().map(|task| format_line(&row_cells(task, ctx), color && ctx.is_overdue(task))).collect()
+    tasks.iter().map(|task| format_line(&row_cells(task, ctx), &row_styles(task, ctx, color))).collect()
 }
 
 fn task_json(task: &StoredTask, ctx: &Context) -> Value {
@@ -301,8 +322,8 @@ fn limit_groups(groups: &mut Vec<Group<'_>>, limit: usize) {
 /// are kept, so a group listed first (`group:label:Eternal|...`) is never cut to make room for a
 /// later one, however the tasks inside it sort.
 ///
-/// With `color`, the header is bold cyan and the due date of an overdue task is red, in the table.
-/// JSON is never coloured.
+/// With `color`, the table is coloured: the header bold cyan, the list yellow, and the due date of
+/// an overdue task red. JSON is never coloured.
 pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: bool, color: bool) -> String {
     sort_tasks(&mut tasks, &query.sorts, ctx);
 
@@ -600,7 +621,7 @@ mod tests {
     }
 
     fn row(id: &str, list: &str) -> String {
-        format_line(&[format!("Task {id}"), list.to_string(), String::new(), String::new()], false)
+        format_line(&[format!("Task {id}"), list.to_string(), String::new(), String::new()], &PLAIN)
     }
 
     #[test]
@@ -755,7 +776,7 @@ mod tests {
 
     /// The same text without the colour codes.
     fn uncoloured(text: &str) -> String {
-        text.replace(RED, "").replace(HEADER, "").replace(RESET, "")
+        text.replace(RED, "").replace(YELLOW, "").replace(HEADER, "").replace(RESET, "")
     }
 
     fn coloured_run(text: &str, tasks: &[StoredTask]) -> String {
@@ -838,7 +859,7 @@ mod tests {
         for heading in out.lines().filter(|l| l.ends_with(")") && !l.starts_with("Task")) {
             assert!(!heading.contains('\x1b'), "{heading:?}");
         }
-        assert!(out.lines().filter(|l| l.contains("Task b")).all(|l| !l.contains('\x1b')));
+        assert!(out.lines().filter(|l| l.contains("Task b")).all(|l| !l.contains(RED)), "b is not overdue");
     }
 
     #[test]
@@ -948,7 +969,7 @@ mod tests {
         assert_eq!(header, format!("{HEADER}{}{RESET}", header_line(false)), "{header:?}");
         assert_eq!(HEADER, "\x1b[1;36m", "bold cyan");
         assert_ne!(HEADER, RED, "not the colour of an overdue date");
-        assert!(out.lines().skip(1).all(|l| !l.contains('\x1b')), "no other line is coloured: {out:?}");
+        assert!(out.lines().skip(1).all(|l| !l.contains(HEADER) && !l.contains(RED)), "only the header is cyan: {out:?}");
     }
 
     #[test]
@@ -1002,6 +1023,88 @@ mod tests {
         assert_eq!(coloured_run("", &[]), "");
         assert_eq!(coloured_run("group:list", &[]), "");
         let out = render(&query(""), vec![&task("a", json!({}))], &context(), true, true);
+        assert!(!out.contains('\x1b'));
+    }
+
+    #[test]
+    fn the_list_is_yellow_when_colour_is_on() {
+        let tasks = [task("a", json!({"list_id": "l-work", "label_ids": ["x-low"]}))];
+
+        let out = coloured_run("", &tasks);
+
+        let row = out.lines().nth(1).unwrap();
+        let (before, rest) = row.split_once(YELLOW).unwrap();
+        let (yellow, after) = rest.split_once(RESET).unwrap();
+        assert_eq!(yellow, "Work", "just the list name is yellow");
+        assert!(before.starts_with("Task a") && !before.contains('\x1b'), "the title is plain: {before:?}");
+        assert!(after.contains("Low") && !after.contains('\x1b'), "the label is plain: {after:?}");
+        assert_eq!(YELLOW, "\x1b[33m");
+    }
+
+    #[test]
+    fn the_list_is_plain_when_colour_is_off() {
+        let tasks = [task("a", json!({"list_id": "l-work"}))];
+        assert!(!run("", &tasks).contains(YELLOW));
+        assert!(!run("group:list", &tasks).contains('\x1b'));
+    }
+
+    #[test]
+    fn a_task_with_no_list_has_nothing_in_yellow() {
+        let out = coloured_run("", &[task("a", json!({"label_ids": ["x-low"]}))]);
+
+        assert!(!out.contains(YELLOW), "{out:?}");
+    }
+
+    #[test]
+    fn several_lists_are_one_yellow_cell() {
+        let t = task("a", json!({"list_id": "l-work", "list_ordinals": {"l-home": 1, "l-work": 2}}));
+
+        let out = coloured_run("", &[t]);
+
+        assert!(out.contains(&format!("{YELLOW}Work, Home{RESET}")), "{out:?}");
+        assert_eq!(out.matches(YELLOW).count(), 1);
+    }
+
+    #[test]
+    fn a_long_list_name_is_cut_before_it_is_coloured_and_the_columns_still_line_up() {
+        let ctx = Context::new(&[json!({"id": "l", "name": "A very long list name"})], &[], now());
+        let t = task("a", json!({"list_id": "l", "timeless_due_at": "2020-01-01", "label_ids": []}));
+
+        let coloured = render(&query(""), vec![&t], &ctx, false, true);
+        let plain = render(&query(""), vec![&t], &ctx, false, false);
+
+        assert!(coloured.contains(&format!("{YELLOW}A very long…{RESET}")), "{coloured:?}");
+        assert_eq!(uncoloured(&coloured), plain);
+    }
+
+    #[test]
+    fn an_overdue_task_has_a_yellow_list_and_a_red_date_and_nothing_else_coloured() {
+        let t = task("a", json!({"list_id": "l-work", "timeless_due_at": "2020-01-01", "label_ids": ["x-low"]}));
+
+        let out = coloured_run("", &[t]);
+
+        let row = out.lines().nth(1).unwrap();
+        assert!(row.contains(&format!("{YELLOW}Work{RESET}")) && row.contains(&format!("{RED}2020-01-01{RESET}")), "{row:?}");
+        assert!(row.find(YELLOW).unwrap() < row.find(RED).unwrap(), "the list column comes before the due column");
+        assert_eq!(row.matches('\x1b').count(), 4, "two codes each for the list and the date: {row:?}");
+        assert_ne!(YELLOW, RED);
+        assert_ne!(YELLOW, HEADER);
+    }
+
+    #[test]
+    fn the_header_stays_cyan_and_the_group_headings_stay_plain_when_grouping_by_list() {
+        let tasks = [task("a", json!({"list_id": "l-work"})), task("b", json!({"list_id": "l-home"}))];
+
+        let out = coloured_run("group:list", &tasks);
+
+        assert!(out.starts_with(HEADER) && !out.lines().next().unwrap().contains(YELLOW));
+        assert_eq!(headings(&out), vec!["Home (1)", "Work (1)"], "no codes in the group headings: {out:?}");
+        assert_eq!(out.matches(YELLOW).count(), 2, "one per task row");
+    }
+
+    #[test]
+    fn json_has_no_yellow() {
+        let out = render(&query(""), vec![&task("a", json!({"list_id": "l-work"}))], &context(), true, true);
         assert!(!out.contains('\x1b'));
     }
 
