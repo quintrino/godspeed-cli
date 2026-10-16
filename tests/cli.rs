@@ -2485,6 +2485,7 @@ fn the_negations_after_the_or_only_apply_to_the_right_hand_side() {
 // ---- overdue tasks in colour ----
 
 const RED: &str = "\x1b[31m";
+const HEADER: &str = "\x1b[1;36m";
 const RESET: &str = "\x1b[0m";
 
 /// A copy with an overdue task, a task due far ahead, an undated one and an overdue one that is
@@ -2524,7 +2525,10 @@ fn overdue_tasks_are_red_with_color_always_and_nothing_else_is() {
         let line = text.lines().find(|l| l.contains(plain)).unwrap();
         assert!(!line.contains('\x1b'), "{plain}: {line:?}");
     }
-    assert!(!text.lines().next().unwrap().contains('\x1b'), "the header is plain");
+    let header = text.lines().next().unwrap();
+    assert!(header.starts_with(HEADER) && header.ends_with(RESET), "the header is bold cyan: {header:?}");
+    assert!(!header.contains(RED), "and not red: {header:?}");
+    assert_eq!(text.matches(HEADER).count(), 1);
 }
 
 #[test]
@@ -2548,7 +2552,7 @@ fn colour_only_adds_the_codes_and_never_changes_the_text() {
     let coloured = stdout(&search(&sandbox, &["--color=always"]));
     let plain = stdout(&search(&sandbox, &["--color=never"]));
 
-    assert_eq!(coloured.replace(RED, "").replace(RESET, ""), plain);
+    assert_eq!(coloured.replace(RED, "").replace(HEADER, "").replace(RESET, ""), plain);
 }
 
 #[test]
@@ -2664,7 +2668,7 @@ fn the_columns_of_the_header_and_the_rows_line_up() {
 
     let text = stdout(&search(&sandbox, &["--color=always"]));
 
-    let plain: Vec<String> = text.lines().map(|l| l.replace(RED, "").replace(RESET, "")).collect();
+    let plain: Vec<String> = text.lines().map(|l| l.replace(RED, "").replace(HEADER, "").replace(RESET, "")).collect();
     let due_column = plain[0].find("DUE").unwrap();
     let overdue = plain.iter().find(|l| l.starts_with("Overdue task")).unwrap();
     assert_eq!(overdue.find("2020-01-01"), Some(due_column), "{overdue:?} under {:?}", plain[0]);
@@ -2689,4 +2693,63 @@ fn json_has_no_header_row() {
 
     assert!(!stdout(&output).contains("TITLE"));
     assert!(serde_json::from_str::<Value>(&stdout(&output)).unwrap().is_array());
+}
+
+// ---- the header colour ----
+
+#[test]
+fn the_header_is_bold_cyan_in_both_plain_and_grouped_output_when_colour_is_on() {
+    let sandbox = overdue_copy("header-colour");
+
+    for args in [&["--color", "always"][..], &["group:due", "--color=always"], &["sort:title", "limit:2", "--color", "always"]] {
+        let text = stdout(&search(&sandbox, args));
+        let first = text.lines().next().unwrap();
+        assert!(first.starts_with(HEADER) && first.ends_with(RESET), "{args:?}: {first:?}");
+        assert!(first.contains("TITLE") && first.contains("LABELS"), "{args:?}: {first:?}");
+        assert_eq!(text.matches(HEADER).count(), 1, "{args:?}: once, not under each group");
+        assert!(!text.lines().skip(1).any(|l| l.contains(HEADER)), "{args:?}");
+    }
+}
+
+#[test]
+fn the_header_is_plain_without_colour_so_pipes_and_files_get_clean_text() {
+    let sandbox = overdue_copy("header-plain");
+    let run = |args: &[&str]| sandbox.run_with_env(None, None, args, None, &[("NO_COLOR", "1")]);
+
+    for output in [search(&sandbox, &[]), search(&sandbox, &["--color", "never"]), run(&["search"]), search(&sandbox, &["group:due"])] {
+        let text = stdout(&output);
+        assert!(text.starts_with("TITLE"), "{text:?}");
+        assert!(!text.contains('\x1b'), "{text:?}");
+    }
+}
+
+#[test]
+fn the_header_colour_and_the_overdue_colour_are_different() {
+    let sandbox = overdue_copy("header-vs-overdue");
+
+    let text = stdout(&search(&sandbox, &["--color", "always"]));
+
+    assert_ne!(HEADER, RED);
+    let header = text.lines().next().unwrap();
+    let overdue = text.lines().find(|l| l.starts_with("Overdue task")).unwrap();
+    assert!(header.contains(HEADER) && !header.contains(RED));
+    assert!(overdue.contains(RED) && !overdue.contains(HEADER));
+}
+
+#[test]
+fn no_results_print_no_coloured_header_either() {
+    let sandbox = overdue_copy("header-colour-none");
+
+    let output = search(&sandbox, &["zzzznothing", "--color", "always"]);
+
+    assert!(stdout(&output).is_empty(), "{:?}", stdout(&output));
+}
+
+#[test]
+fn json_has_no_colour_even_for_the_header_case() {
+    let sandbox = overdue_copy("header-colour-json");
+
+    let output = search(&sandbox, &["--json", "--color", "always"]);
+
+    assert!(!stdout(&output).contains('\x1b'));
 }

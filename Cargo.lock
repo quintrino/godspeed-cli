@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "godspeed-cli"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "chrono",
  "reqwest",

@@ -229,8 +229,9 @@ fn row_cells(task: &StoredTask, ctx: &Context) -> [String; 4] {
     ]
 }
 
-/// ANSI escape codes for red text and for going back to normal.
+/// ANSI escape codes: red text, bold cyan text, and going back to normal.
 const RED: &str = "\x1b[31m";
+const HEADER: &str = "\x1b[1;36m";
 const RESET: &str = "\x1b[0m";
 
 /// Which column holds the due date.
@@ -258,9 +259,11 @@ fn format_line(cells: &[String; 4], red_due: bool) -> String {
     line.join("  ").trim_end().to_string()
 }
 
-/// The column labels.
-fn header_line() -> String {
-    format_line(&["TITLE", "LIST", "DUE", "LABELS"].map(String::from), false)
+/// The column labels. With `color` they are bold cyan, so they stand apart from the rows (and
+/// from the red of an overdue date).
+fn header_line(color: bool) -> String {
+    let line = format_line(&["TITLE", "LIST", "DUE", "LABELS"].map(String::from), false);
+    if color { format!("{HEADER}{line}{RESET}") } else { line }
 }
 
 /// The rows of the table. With `color`, the due date of an overdue task is red.
@@ -298,8 +301,8 @@ fn limit_groups(groups: &mut Vec<Group<'_>>, limit: usize) {
 /// are kept, so a group listed first (`group:label:Eternal|...`) is never cut to make room for a
 /// later one, however the tasks inside it sort.
 ///
-/// With `color`, the due date of an overdue task is shown in red in the table. JSON is never
-/// coloured.
+/// With `color`, the header is bold cyan and the due date of an overdue task is red, in the table.
+/// JSON is never coloured.
 pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: bool, color: bool) -> String {
     sort_tasks(&mut tasks, &query.sorts, ctx);
 
@@ -335,11 +338,11 @@ pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: b
                 })
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            format!("{}\n{body}", header_line())
+            format!("{}\n{body}", header_line(color))
         }
         None if tasks.is_empty() => String::new(),
         None => {
-            let mut lines = vec![header_line()];
+            let mut lines = vec![header_line(color)];
             lines.extend(table_rows(&tasks, ctx, color));
             lines.join("\n")
         }
@@ -592,7 +595,7 @@ mod tests {
         let out = run("group:list", &tasks);
         assert_eq!(
             out,
-            format!("{}\nHome (1)\n{}\n\nWork (2)\n{}\n{}", header_line(), row("c", "Home"), row("a", "Work"), row("b", "Work"))
+            format!("{}\nHome (1)\n{}\n\nWork (2)\n{}\n{}", header_line(false), row("c", "Home"), row("a", "Work"), row("b", "Work"))
         );
     }
 
@@ -752,7 +755,7 @@ mod tests {
 
     /// The same text without the colour codes.
     fn uncoloured(text: &str) -> String {
-        text.replace(RED, "").replace(RESET, "")
+        text.replace(RED, "").replace(HEADER, "").replace(RESET, "")
     }
 
     fn coloured_run(text: &str, tasks: &[StoredTask]) -> String {
@@ -771,7 +774,7 @@ mod tests {
 
         let out = coloured_run("", &tasks);
 
-        for line in out.lines() {
+        for line in out.lines().skip(1) {
             let overdue = line.starts_with("Task overdue") || line.starts_with("Task yesterday");
             assert_eq!(line.contains(RED), overdue, "{line:?}");
             if !overdue {
@@ -779,14 +782,14 @@ mod tests {
             }
         }
         assert_eq!(out.matches(RED).count(), 2, "only the two overdue rows: {out}");
-        assert_eq!(out.matches(RESET).count(), 2);
         let overdue_row = out.lines().find(|l| l.starts_with("Task overdue")).unwrap();
         let yesterday_row = out.lines().find(|l| l.starts_with("Task yesterday")).unwrap();
         // Red is just the date: it starts after the title and list, and stops straight after it.
         assert!(overdue_row.contains(&format!("{RED}2020-01-01{RESET}")), "{overdue_row:?}");
         assert!(yesterday_row.contains(&format!("{RED}2026-10-14{RESET}")), "{yesterday_row:?}");
         assert!(!overdue_row.starts_with(RED), "the title is not red: {overdue_row:?}");
-        assert!(out.lines().next().unwrap().starts_with("TITLE") && !out.lines().next().unwrap().contains('\x1b'), "the header is plain");
+        assert_eq!(out.matches(RESET).count(), 3, "two overdue dates and the header");
+        assert!(!out.lines().next().unwrap().contains(RED), "the header is not red");
     }
 
     #[test]
@@ -821,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn grouped_output_colours_overdue_dates_but_not_the_headings_or_the_header() {
+    fn grouped_output_colours_overdue_dates_but_not_the_group_headings() {
         let tasks = [
             task("a", json!({"list_id": "l-work", "timeless_due_at": "2020-01-01"})),
             task("b", json!({"list_id": "l-work", "timeless_due_at": "2099-01-01"})),
@@ -832,6 +835,9 @@ mod tests {
 
         assert_eq!(headings(&out), vec!["Home (1)", "Work (2)"], "headings stay plain: {out}");
         assert_eq!(out.matches(RED).count(), 2);
+        for heading in out.lines().filter(|l| l.ends_with(")") && !l.starts_with("Task")) {
+            assert!(!heading.contains('\x1b'), "{heading:?}");
+        }
         assert!(out.lines().filter(|l| l.contains("Task b")).all(|l| !l.contains('\x1b')));
     }
 
@@ -852,7 +858,7 @@ mod tests {
 
         let out = coloured_run("", &[snoozed]);
 
-        assert!(!out.contains('\x1b'), "{out}");
+        assert!(!out.contains(RED), "{out}");
     }
 
     #[test]
@@ -865,7 +871,7 @@ mod tests {
         let out = run("group:list", &tasks);
 
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[0], header_line());
+        assert_eq!(lines[0], header_line(false));
         assert!(lines[0].starts_with("TITLE") && lines[0].contains("LIST") && lines[0].contains("DUE") && lines[0].ends_with("LABELS"));
         assert_eq!(out.matches("TITLE").count(), 1, "only once, not under every group: {out}");
         assert_eq!(lines[1], "Home (1)", "the first group follows the header: {out}");
@@ -900,7 +906,7 @@ mod tests {
     #[test]
     fn ungrouped_output_has_the_same_header() {
         let out = run("", &[task("a", json!({}))]);
-        assert_eq!(out.lines().next().unwrap(), header_line());
+        assert_eq!(out.lines().next().unwrap(), header_line(false));
     }
 
     #[test]
@@ -930,6 +936,73 @@ mod tests {
         let label_column = plain.lines().nth(1).unwrap().find("Low").unwrap();
         assert_eq!(label_column, plain.lines().next().unwrap().find("LABELS").unwrap());
         assert!(!plain.lines().nth(2).unwrap().ends_with(' '), "no trailing spaces on a row with no labels");
+    }
+
+    #[test]
+    fn the_header_is_bold_cyan_when_colour_is_on() {
+        let tasks = [task("a", json!({"list_id": "l-work"}))];
+
+        let out = coloured_run("", &tasks);
+
+        let header = out.lines().next().unwrap();
+        assert_eq!(header, format!("{HEADER}{}{RESET}", header_line(false)), "{header:?}");
+        assert_eq!(HEADER, "\x1b[1;36m", "bold cyan");
+        assert_ne!(HEADER, RED, "not the colour of an overdue date");
+        assert!(out.lines().skip(1).all(|l| !l.contains('\x1b')), "no other line is coloured: {out:?}");
+    }
+
+    #[test]
+    fn the_header_is_plain_when_colour_is_off() {
+        let tasks = [task("a", json!({"list_id": "l-work", "timeless_due_at": "2020-01-01"}))];
+
+        let out = run("", &tasks);
+
+        assert_eq!(out.lines().next().unwrap(), header_line(false));
+        assert!(!out.contains('\x1b'));
+        assert!(!run("group:list", &tasks).contains('\x1b'));
+    }
+
+    #[test]
+    fn the_header_is_coloured_once_in_grouped_output_and_the_group_headings_are_not() {
+        let tasks = [
+            task("a", json!({"list_id": "l-work"})),
+            task("b", json!({"list_id": "l-home"})),
+        ];
+
+        let out = coloured_run("group:list", &tasks);
+
+        assert_eq!(out.matches(HEADER).count(), 1, "{out:?}");
+        assert!(out.starts_with(HEADER));
+        assert_eq!(headings(&out), vec!["Home (1)", "Work (1)"], "{out:?}");
+        assert_eq!(uncoloured(&out), run("group:list", &tasks), "the text is the same");
+    }
+
+    #[test]
+    fn the_header_is_coloured_even_when_nothing_is_overdue() {
+        let out = coloured_run("", &[task("a", json!({}))]);
+
+        assert!(out.starts_with(HEADER) && !out.contains(RED), "{out:?}");
+    }
+
+    #[test]
+    fn the_coloured_header_lines_up_with_the_rows_and_has_no_trailing_spaces() {
+        let tasks = [task("a", json!({"list_id": "l-work", "timeless_due_at": "2020-01-01", "label_ids": ["x-low"]}))];
+
+        let out = coloured_run("", &tasks);
+
+        let plain = uncoloured(&out);
+        let lines: Vec<&str> = plain.lines().collect();
+        assert_eq!(lines[0].find("DUE"), lines[1].find("2020"));
+        assert_eq!(lines[0].find("LABELS"), lines[1].find("Low"));
+        assert!(!out.lines().next().unwrap().trim_end_matches(RESET).ends_with(' '), "{out:?}");
+    }
+
+    #[test]
+    fn no_results_print_nothing_even_with_colour_and_json_has_no_colour() {
+        assert_eq!(coloured_run("", &[]), "");
+        assert_eq!(coloured_run("group:list", &[]), "");
+        let out = render(&query(""), vec![&task("a", json!({}))], &context(), true, true);
+        assert!(!out.contains('\x1b'));
     }
 
     #[test]

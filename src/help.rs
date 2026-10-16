@@ -170,13 +170,14 @@ OPTIONS:
                          a note on stderr.
     --max-age AGE        Update the copy first if it is older than AGE, such as 30m, 6h, "2 days"
                          or 0 (always). "never" turns off a max_age from the settings file.
-    --color WHEN         Show the due date of overdue tasks in red in the table. WHEN is auto (the default: only
-                         on a terminal, and not if NO_COLOR is set or TERM is dumb), always (for
-                         `| less -R`, and overriding NO_COLOR) or never. Only the table is
-                         coloured, never JSON. A task is overdue when its effective due date (the
-                         later of its due date and its snooze date) has passed: a date with no
-                         time from the day after, a date with a time once that time has passed.
-                         Completed tasks are never overdue.
+    --color WHEN         Colour the table: the header is bold cyan and the due date of an
+                         overdue task is red. Never JSON. WHEN is auto (the default: only on a
+                         terminal, and not if NO_COLOR is set or TERM is dumb), always (for
+                         `| less -R`, and overriding NO_COLOR) or never.
+                         A task is overdue when its effective due date (the later of its due
+                         date and its snooze date) has passed: a date with no time from the day
+                         after, a date with a time once that time has passed. Completed tasks
+                         are never overdue.
     --json               Print the tasks as JSON (the full records, plus list_names and
                          label_names), or as {"group", "tasks"} objects when grouping. The
                          table shows the title (80 characters), list (12), due date and

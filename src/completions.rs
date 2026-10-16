@@ -323,7 +323,7 @@ complete -c godspeed-cli -n '__fish_seen_subcommand_from refresh' -l json -d 'Pr
 complete -c godspeed-cli -n '__fish_seen_subcommand_from search' -l json -d 'Print the results as JSON'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from search' -l refresh -d 'Update the copy first'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from search' -l max-age -x -d 'Update the copy first if older than this'
-complete -c godspeed-cli -n '__fish_seen_subcommand_from search' -l color -x -a 'auto always never' -d 'When to colour the due date of overdue tasks'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from search' -l color -x -a 'auto always never' -d 'When to use colour'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from completions' -a 'bash fish zsh'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from add search' -a '(__godspeed_cli_names)'
 "##;
