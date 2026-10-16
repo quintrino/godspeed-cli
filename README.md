@@ -40,33 +40,41 @@ cp target/release/godspeed-cli /usr/local/bin/
 
 ## Basic Usage
 
-The CLI accepts input in two ways:
+Every use starts with a command. **A task is only ever created with `add`**; running `godspeed-cli` with anything that isn't a command is an error, so a typo can't turn into a task by accident:
 
-### Command-line arguments (recommended: use quotes)
-```bash
-godspeed-cli "Buy groceries and cook dinner"
+```console
+$ godspeed-cli string
+Error: 'string' isn't a valid godspeed-cli command.
+Commands: add, refresh, search, completions. Run `godspeed-cli --help` for usage.
+To create a task, use add: godspeed-cli add "string"
 ```
 
-### Via stdin
+### Creating a task
+
+The text of the task is the rest of the line (recommended: use quotes), or stdin:
+
 ```bash
-echo "Buy groceries and cook dinner" | godspeed-cli
+godspeed-cli add "Buy groceries and cook dinner"
+echo "Buy groceries and cook dinner" | godspeed-cli add
 ```
 
 ### Commands
 
 | Command | |
 | --- | --- |
-| `add` | Create a task. This is the default, so `godspeed-cli "Buy milk"` and `godspeed-cli add "Buy milk"` are the same. `add --json` also prints the API's response. See [add --json](#add---json). |
-| `refresh` | Download your tasks, lists and labels into a local cache. See [Refresh](#refresh). |
+| `add` | Create a task. `add --json` also prints the API's response. See [add --json](#add---json). |
+| `refresh` | Keep a local copy of your tasks, lists and labels. See [Refresh](#refresh). |
 | `search` | Search the local copy made by `refresh`, offline. See [Search](#search). |
+| `completions` | Print a shell completion script for bash, zsh or fish. See [Shell completions](#shell-completions). |
 
-A command is recognised only when it is the **whole first argument**, in lowercase. So `godspeed-cli "search the attic"` (quoted) and `godspeed-cli buy add milk` still create tasks. If you type the words unquoted, `godspeed-cli search the attic` runs the `search` command instead. To create a task whose text starts with a command word, quote it, put `add` in front, or use `--`:
+A command is recognised only as the **first argument**, in lowercase. After `add` the task can start with any word, including a command name, so nothing needs escaping:
 
 ```bash
-godspeed-cli "search the attic"
 godspeed-cli add search the attic
-godspeed-cli -- search the attic
+godspeed-cli add completions are due ~5m
 ```
+
+The one exception is a task that starts with an option: `-h`, `--help`, `-V`, `--version`, `--json` or `--`. Put `--` first for that: `godspeed-cli add -- --version bump`.
 
 ### `add --json`
 
@@ -85,11 +93,10 @@ godspeed-cli add --json "Pay rent @Home" | jq -r '.todo_item.id'
 
 | Option | |
 | --- | --- |
-| `-h`, `--help` | Print the usage and task syntax, then exit. |
+| `-h`, `--help` | Print the usage and task syntax, then exit. `search --help` and `completions --help` print their own. |
 | `-V`, `--version` | Print the version, then exit. |
-| `--` | Treat everything after it as the task, for a task that starts with `-h`, `--help`, `-V` or `--version`. |
 
-These are only recognised as the first argument, so `godspeed-cli "fix the --version bug"` still creates a task. `--help` and `--version` don't need `GODSPEED_TOKEN` and never create a task.
+These are only recognised as the first argument (or straight after `add`), so `godspeed-cli add "fix the --version bug"` still creates a task. `--help` and `--version` don't need `GODSPEED_TOKEN` and never create a task.
 
 ### Exit status
 
@@ -97,9 +104,9 @@ These are only recognised as the first argument, so `godspeed-cli "fix the --ver
 | --- | --- |
 | `0` | Success. |
 | `1` | Something failed, such as the API being unreachable or refusing the request. A task that couldn't be sent is queued and retried (see [Offline Cache](#offline-cache)). |
-| `2` | The input can't be used: no token, an invalid task, or a bad query. Nothing is queued, because retrying wouldn't help. |
+| `2` | The input can't be used: an unknown command, no token, an invalid task, or a bad query. Nothing is queued, because retrying wouldn't help. |
 
-Use this in scripts: `godspeed-cli "..." || echo "not created"`.
+Use this in scripts: `godspeed-cli add "..." || echo "not created"`.
 
 ## Special Syntax
 
@@ -109,7 +116,7 @@ Add hashtags anywhere in your task to create labels. They'll be removed from the
 #NOTE: Because of Shell limitations, this only works with single word labels
 
 ```bash
-godspeed-cli "Review pull request .Urgent .Work"
+godspeed-cli add "Review pull request .Urgent .Work"
 # Title: "Review pull request"
 # Labels: ["Urgent", "Work"]
 ```
@@ -120,7 +127,7 @@ Specify which list to add the task to using `@ListName`. The list name will be m
 #NOTE: Because of Shell limitations, this only works with single word lists
 
 ```bash
-godspeed-cli "Call dentist @Personal"
+godspeed-cli add "Call dentist @Personal"
 # Adds to your "Personal" list
 ```
 
@@ -132,7 +139,7 @@ A task needs a title: one made only of `.label`, `@list`, `~duration` and `:date
 Set the task duration with `~` followed by a number, in minutes (`~45`, `~45m`) or hours (`~2h`, `~1.5h`). Fractions are rounded to whole minutes.
 
 ```bash
-godspeed-cli "Workout session ~45m"
+godspeed-cli add "Workout session ~45m"
 # Title: "Workout session"
 # Duration: 45 minutes
 ```
@@ -155,7 +162,7 @@ Set the due date with `:` followed by a keyword or a date. The date has no time 
 | `:2026-10-31` | 31 October 2026 |
 
 ```bash
-godspeed-cli "Send invoice :tomorrow"
+godspeed-cli add "Send invoice :tomorrow"
 # Title: "Send invoice"
 # Due: tomorrow's date
 ```
@@ -168,7 +175,7 @@ If a task with a relative date (`:today`, `:tomorrow`, `:next-week`) can't be se
 Add detailed notes to your task using `n:` followed by the note content. Everything after `n:` becomes the note.
 
 ```bash
-godspeed-cli "Buy ingredients n: Need milk, eggs, flour, and butter for baking"
+godspeed-cli add "Buy ingredients n: Need milk, eggs, flour, and butter for baking"
 # Title: "Buy ingredients"
 # Notes: "Need milk, eggs, flour, and butter for baking"
 ```
@@ -178,7 +185,7 @@ godspeed-cli "Buy ingredients n: Need milk, eggs, flour, and butter for baking"
 You can combine all special syntax in a single task:
 
 ```bash
-godspeed-cli "Write blog post @Work .Writing ~2h :tomorrow n: Focus on the new API features and include code examples"
+godspeed-cli add "Write blog post @Work .Writing ~2h :tomorrow n: Focus on the new API features and include code examples"
 ```
 
 This creates a task with:
@@ -198,7 +205,7 @@ echo "Project planning session
 Agenda items:
 - Review Q4 goals
 - Discuss team resources
-.Management @Work :90" | godspeed-cli
+.Management @Work :90" | godspeed-cli add
 ```
 
 ## Refresh
@@ -374,9 +381,40 @@ Search reads these fields from each task's JSON: `title`, `notes`, `attachments`
 
 `title`, `notes`, `list_id`, `label_ids`, `timeless_due_at` and `duration_minutes` are the fields that task creation sends. The others were taken from another Godspeed client and have **not been checked against a real account**; in particular, how folders and label groups are represented is a guess. If an operator never matches, look at what the API returned for one of your tasks (`sqlite3 ~/.local/share/godspeed-cli/cache.sqlite3 'select json from tasks limit 1'`) and compare the field names. They are all read in `src/eval.rs`.
 
+## Shell completions
+
+`godspeed-cli completions <shell>` prints a script that adds tab completion to **bash**, **zsh** or **fish**. Nothing is installed or changed until you use the script:
+
+| Shell | Add to | The line |
+| --- | --- | --- |
+| bash | `~/.bashrc` | `eval "$(godspeed-cli completions bash)"` |
+| zsh | `~/.zshrc`, after `compinit` | `eval "$(godspeed-cli completions zsh)"` |
+| fish | `~/.config/fish/config.fish` | `godspeed-cli completions fish \| source` |
+
+Open a new shell, and Tab completes:
+
+- the commands (`add`, `refresh`, `search`, `completions`), `--help` and `--version`;
+- each command's flags: `--json`, `--full`, `--include-completed`, `--refresh`, `--max-age`;
+- the shell names after `completions`;
+- **in `add`, the names of your lists after `@` and your labels after `.`**: `godspeed-cli add "Buy milk @Wo<Tab>` becomes `@WorkProjects`;
+- **in `search`, list names after `list:` and `in:`, and label names after `label:`**, including after `!`, `-` and `(`.
+
+It deliberately does **not** complete other operators such as `due:` or `has:`, or any other part of a task or query.
+
+**Where the names come from.** The names are read from disk, so completion works offline and needs no token: from the local copy made by `godspeed-cli refresh` (run it once to have all your lists and labels), and from the lists and labels already used when creating tasks. Names are matched ignoring case.
+
+**Names with spaces.** A task's `@list` and `.label` have to be one word, so a name with spaces is offered without them: "Work Projects" becomes `WorkProjects`. godspeed-cli accepts that form, in tasks (`@WorkProjects`, `.WorkProjects`) and in searches (`list:WorkProjects`).
+
+**Names are never run.** A name is only offered if it is made of letters, digits and `_ - . : + /`. A list called `Evil $(rm -rf ~)` is simply left out, so a completion script can never be made to run a command by the name of a list or label.
+
+Notes:
+- Completing inside a quoted task or query (`add "Buy milk @Wo<Tab>`) works in bash and zsh and is meant to in fish.
+- The bash script runs on bash 3.2, the version macOS ships. In bash, `:` is a word break, which the script handles either way, so `search label:U<Tab>` works whether or not you have changed `COMP_WORDBREAKS`.
+- The bash completion is covered by the test suite, which runs it in real bash. **The zsh and fish scripts have not been run in those shells**, as they weren't available where this was written, so please say if one misbehaves.
+
 ## Offline Cache
 
-If the API is unreachable or a request fails, the task is automatically cached locally. The next time you run the CLI (for any task), it will:
+If the API is unreachable or a request fails, the task is automatically cached locally. The next time you run `add` (for any task), it will:
 
 1. Attempt to send all cached tasks first
 2. Remove successfully sent tasks from the cache
@@ -412,7 +450,7 @@ Create a shell alias or keyboard shortcut:
 
 ```bash
 # In .zshrc or config.fish
-alias gs='godspeed-cli'
+alias gs='godspeed-cli add'
 
 # Quick usage
 gs "Task with .label @list"
@@ -423,13 +461,13 @@ Because `#` starts a comment in most shells, always use quotes or escape hashes
 
 ```bash
 # ✅ Good - quoted
-godspeed-cli "Task .Urgent #hashtag"
+godspeed-cli add "Task .Urgent #hashtag"
 
 # ✅ Good - escaped
-godspeed-cli Task \#hashtag
+godspeed-cli add Task \#hashtag
 
 # ❌ Bad - shell treats #hashtag as a comment
-godspeed-cli Task #hashtag
+godspeed-cli add Task #hashtag
 ```
 
 ### Piping from other tools
@@ -437,22 +475,22 @@ Combine with other CLI tools for powerful workflows:
 
 ```bash
 # From clipboard (macOS)
-pbpaste | godspeed-cli
+pbpaste | godspeed-cli add
 
 # From a file
-cat todo.txt | godspeed-cli
+cat todo.txt | godspeed-cli add
 
 # From a command
-echo "Deploy to production @DevOps .Urgent :30" | godspeed-cli
+echo "Deploy to production @DevOps .Urgent :30" | godspeed-cli add
 ```
 
 ### Case-insensitive matching
 List names are matched case-insensitively, so these are equivalent:
 
 ```bash
-godspeed-cli "Task @work"
-godspeed-cli "Task @Work"
-godspeed-cli "Task @WORK"
+godspeed-cli add "Task @work"
+godspeed-cli add "Task @Work"
+godspeed-cli add "Task @WORK"
 ```
 
 ## Troubleshooting
@@ -494,23 +532,23 @@ Optional settings are kept separately, in `$XDG_CONFIG_HOME/godspeed-cli/config.
 
 ```bash
 # Simple task
-godspeed-cli "Call mom"
+godspeed-cli add "Call mom"
 
 # Task with label
-godspeed-cli "Review code .Development"
+godspeed-cli add "Review code .Development"
 
 # Task with list and duration
-godspeed-cli "Gym workout @Health :60"
+godspeed-cli add "Gym workout @Health :60"
 
 # Complete task with all features
-godspeed-cli "Prepare presentation @Work .Important :120 n: Include Q3 metrics and team feedback"
+godspeed-cli add "Prepare presentation @Work .Important :120 n: Include Q3 metrics and team feedback"
 
 # Multi-line via stdin
 echo "Research new framework
 - Check documentation
 - Test examples
 - Write summary
-.Development @Learning :180" | godspeed-cli
+.Development @Learning :180" | godspeed-cli add
 ````
 
 ## Development

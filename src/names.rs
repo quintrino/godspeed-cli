@@ -31,7 +31,8 @@ pub fn save(path: &Path, cache: &NameMap) -> io::Result<()> {
     fs::write(path, toml_string)
 }
 
-/// Looks a name up by exact match, then by prefix. Used for labels.
+/// Looks a name up by exact match, then by prefix, then by the whole name ignoring spaces, slashes
+/// and dashes. Used for labels.
 pub fn find_matching_key(cache: &NameMap, search: &str) -> Option<String> {
     let search_lower = search.to_lowercase();
 
@@ -41,7 +42,17 @@ pub fn find_matching_key(cache: &NameMap, search: &str) -> Option<String> {
     }
 
     // Then try prefix match
-    best_match(cache, |key| key.starts_with(&search_lower))
+    if let Some(id) = best_match(cache, |key| key.starts_with(&search_lower)) {
+        return Some(id);
+    }
+
+    // Then the same name with the spaces, slashes and dashes left out, as shell completion offers
+    // it (`WorkProjects` for "Work Projects"). The whole name has to match, not part of it.
+    let search_squashed = squash(&search_lower);
+    if search_squashed.is_empty() {
+        return None;
+    }
+    best_match(cache, |key| squash(key) == search_squashed)
 }
 
 /// The id of the shortest matching key (ties broken alphabetically), so the result doesn't
@@ -109,6 +120,19 @@ mod tests {
         assert_eq!(find_matching_key(&cache, "wor").as_deref(), Some("3x"));
         let cache = lists(&[("work later", "1"), ("work now", "2")]);
         assert_eq!(find_matching_key(&cache, "wor").as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn a_name_can_be_given_without_its_spaces_as_completion_offers_it() {
+        let cache = lists(&[("work projects", "1"), ("high-priority", "2"), ("home", "3")]);
+        assert_eq!(find_matching_key(&cache, "WorkProjects").as_deref(), Some("1"));
+        assert_eq!(find_matching_key(&cache, "highpriority").as_deref(), Some("2"));
+        assert_eq!(find_list_key(&cache, "workprojects").as_deref(), Some("1"));
+        // It has to be the whole name: part of it still doesn't match a label.
+        assert_eq!(find_matching_key(&cache, "projects"), None);
+        assert_eq!(find_matching_key(&cache, "-"), None);
+        assert_eq!(find_matching_key(&cache, "workproj"), None, "part of the squashed name is not enough");
+        assert_eq!(find_matching_key(&cache, "work p").as_deref(), Some("1"), "a real prefix still works");
     }
 
     #[test]

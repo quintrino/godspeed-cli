@@ -277,7 +277,8 @@ impl Sandbox {
         }
         let mut child = command.spawn().unwrap();
         if let Some(text) = stdin {
-            child.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+            // The program may exit without reading stdin (for instance on an unknown command).
+            let _ = child.stdin.take().unwrap().write_all(text.as_bytes());
         }
         child.wait_with_output().unwrap()
     }
@@ -310,7 +311,7 @@ fn a_task_with_every_kind_of_syntax_is_posted_with_the_right_fields() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("full-flow");
 
-    sandbox.run(&api, &["Pay rent @work .urgent .writing ~1.5h :20261101 n: ring the landlord"]);
+    sandbox.run(&api, &["add", "Pay rent @work .urgent .writing ~1.5h :20261101 n: ring the landlord"]);
 
     assert_eq!(
         api.posted_tasks(),
@@ -334,7 +335,7 @@ fn separate_arguments_are_joined_into_one_task() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("separate-args");
 
-    sandbox.run(&api, &["Buy", "milk", "@home", "~10m"]);
+    sandbox.run(&api, &["add", "Buy", "milk", "@home", "~10m"]);
 
     let tasks = api.posted_tasks();
     assert_eq!(tasks[0]["title"], "Buy milk");
@@ -348,9 +349,9 @@ fn relative_due_dates_resolve_against_todays_date() {
     let sandbox = Sandbox::new("relative-dates");
     let before = today();
 
-    sandbox.run(&api, &["Ship it :tomorrow"]);
-    sandbox.run(&api, &["Ship it later :today"]);
-    sandbox.run(&api, &["Ship it eventually :next-week"]);
+    sandbox.run(&api, &["add", "Ship it :tomorrow"]);
+    sandbox.run(&api, &["add", "Ship it later :today"]);
+    sandbox.run(&api, &["add", "Ship it eventually :next-week"]);
 
     let tasks = api.posted_tasks();
     assert_is_tomorrow(&tasks[0]["timeless_due_at"], before);
@@ -365,7 +366,7 @@ fn the_original_colon_minutes_syntax_still_sets_the_duration() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("legacy-minutes");
 
-    sandbox.run(&api, &["Workout :45"]);
+    sandbox.run(&api, &["add", "Workout :45"]);
 
     let task = &api.posted_tasks()[0];
     assert_eq!(task["title"], "Workout");
@@ -378,7 +379,7 @@ fn words_that_only_resemble_syntax_stay_in_the_title() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("lookalikes");
 
-    sandbox.run(&api, &["Learn C++ and ~roughly everything :someday"]);
+    sandbox.run(&api, &["add", "Learn C++ and ~roughly everything :someday"]);
 
     let task = &api.posted_tasks()[0];
     assert_eq!(task["title"], "Learn C++ and ~roughly everything :someday");
@@ -391,7 +392,7 @@ fn notes_are_not_scanned_for_syntax() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("notes");
 
-    sandbox.run(&api, &["Call bank n: ask about ~5m :today @home .urgent"]);
+    sandbox.run(&api, &["add", "Call bank n: ask about ~5m :today @home .urgent"]);
 
     let task = &api.posted_tasks()[0];
     assert_eq!(task["title"], "Call bank");
@@ -407,7 +408,7 @@ fn a_task_can_be_read_from_stdin() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("stdin");
 
-    sandbox.run_stdin(&api, &[], "Weekly review @work ~30m n: look at the board\n");
+    sandbox.run_stdin(&api, &["add"], "Weekly review @work ~30m n: look at the board\n");
 
     let task = &api.posted_tasks()[0];
     assert_eq!(task["title"], "Weekly review");
@@ -421,7 +422,7 @@ fn a_task_starting_with_a_flag_can_be_created_after_double_dash() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("double-dash");
 
-    sandbox.run(&api, &["--", "--version", "bump", "~15m"]);
+    sandbox.run(&api, &["add", "--", "--version", "bump", "~15m"]);
 
     let task = &api.posted_tasks()[0];
     assert_eq!(task["title"], "--version bump");
@@ -433,10 +434,10 @@ fn list_names_match_by_prefix_and_by_substring() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("list-matching");
 
-    sandbox.run(&api, &["One @WORK"]);
-    sandbox.run(&api, &["Two @workproj"]);
-    sandbox.run(&api, &["Three @ojects"]);
-    sandbox.run(&api, &["Four @work-projects"]);
+    sandbox.run(&api, &["add", "One @WORK"]);
+    sandbox.run(&api, &["add", "Two @workproj"]);
+    sandbox.run(&api, &["add", "Three @ojects"]);
+    sandbox.run(&api, &["add", "Four @work-projects"]);
 
     for task in api.posted_tasks() {
         assert_eq!(task["list_id"], "list-work", "{task}");
@@ -448,7 +449,7 @@ fn an_unknown_list_or_label_does_not_stop_the_task_being_created() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("unknown-names");
 
-    sandbox.run(&api, &["Lost task @nowhere .nothing"]);
+    sandbox.run(&api, &["add", "Lost task @nowhere .nothing"]);
 
     let task = &api.posted_tasks()[0];
     assert_eq!(task["title"], "Lost task");
@@ -461,9 +462,9 @@ fn lists_and_labels_are_fetched_once_and_then_read_from_the_cache() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("name-cache");
 
-    sandbox.run(&api, &["First @work .urgent"]);
-    sandbox.run(&api, &["Second @home .writing"]);
-    sandbox.run(&api, &["Third @work .urgent"]);
+    sandbox.run(&api, &["add", "First @work .urgent"]);
+    sandbox.run(&api, &["add", "Second @home .writing"]);
+    sandbox.run(&api, &["add", "Third @work .urgent"]);
 
     assert_eq!(api.count("GET", "/lists"), 1);
     assert_eq!(api.count("GET", "/labels"), 1);
@@ -479,7 +480,7 @@ fn a_failed_send_is_queued_with_absolute_dates_and_retried_first_next_time() {
     let before = today();
 
     let down = MockApi::start(500);
-    let output = sandbox.run(&down, &["Buy milk @home ~10m :tomorrow n: oat, not dairy"]);
+    let output = sandbox.run(&down, &["add", "Buy milk @home ~10m :tomorrow n: oat, not dairy"]);
     assert!(stderr(&output).contains("Failed to send task"), "{}", stderr(&output));
 
     let queued = sandbox.queued_tasks();
@@ -489,7 +490,7 @@ fn a_failed_send_is_queued_with_absolute_dates_and_retried_first_next_time() {
     assert!(queued[0].ends_with("n: oat, not dairy"), "{}", queued[0]);
 
     let up = MockApi::start(200);
-    sandbox.run(&up, &["Second task"]);
+    sandbox.run(&up, &["add", "Second task"]);
 
     let tasks = up.posted_tasks();
     assert_eq!(tasks.len(), 2);
@@ -506,8 +507,8 @@ fn a_queued_task_stays_queued_while_the_api_keeps_failing() {
     let sandbox = Sandbox::new("still-failing");
     let down = MockApi::start(500);
 
-    sandbox.run(&down, &["First"]);
-    sandbox.run(&down, &["Second"]);
+    sandbox.run(&down, &["add", "First"]);
+    sandbox.run(&down, &["add", "Second"]);
 
     assert_eq!(sandbox.queued_tasks(), vec!["First", "Second"]);
 }
@@ -516,7 +517,7 @@ fn a_queued_task_stays_queued_while_the_api_keeps_failing() {
 fn an_unreachable_api_queues_the_task() {
     let sandbox = Sandbox::new("unreachable");
     // Nothing listens on port 1.
-    let output = sandbox.run_with(Some("http://127.0.0.1:1"), Some("test-token"), &["Offline task :today"], None);
+    let output = sandbox.run_with(Some("http://127.0.0.1:1"), Some("test-token"), &["add", "Offline task :today"], None);
 
     assert!(stderr(&output).contains("Failed to send task"), "{}", stderr(&output));
     assert_eq!(sandbox.queued_tasks().len(), 1);
@@ -527,7 +528,7 @@ fn nothing_is_sent_without_a_token() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("no-token");
 
-    let output = sandbox.run_with(Some(&api.url), None, &["Task without a token"], None);
+    let output = sandbox.run_with(Some(&api.url), None, &["add", "Task without a token"], None);
 
     assert!(stderr(&output).contains("GODSPEED_TOKEN"), "{}", stderr(&output));
     assert!(api.requests().is_empty());
@@ -558,7 +559,7 @@ fn more_than_one_list_is_rejected_without_contacting_the_api_or_queueing() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("two-lists");
 
-    let output = sandbox.run(&api, &["Confused task @work @home"]);
+    let output = sandbox.run(&api, &["add", "Confused task @work @home"]);
 
     assert!(stderr(&output).contains("Multiple lists"), "{}", stderr(&output));
     assert_eq!(code(&output), 2);
@@ -571,7 +572,7 @@ fn a_task_with_no_title_is_rejected_without_contacting_the_api_or_queueing() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("no-title");
 
-    let output = sandbox.run(&api, &["@work .urgent ~10m :tomorrow n: only notes"]);
+    let output = sandbox.run(&api, &["add", "@work .urgent ~10m :tomorrow n: only notes"]);
 
     assert!(stderr(&output).contains("no title"), "{}", stderr(&output));
     assert_eq!(code(&output), 2);
@@ -584,7 +585,7 @@ fn at_signs_in_the_notes_do_not_count_as_lists() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("at-in-notes");
 
-    let output = sandbox.run(&api, &["Call bank @home n: ask @bob and @alice about fees"]);
+    let output = sandbox.run(&api, &["add", "Call bank @home n: ask @bob and @alice about fees"]);
 
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     let task = &api.posted_tasks()[0];
@@ -598,11 +599,11 @@ fn exit_codes_distinguish_success_failure_and_unusable_input() {
     let up = MockApi::start(200);
     let down = MockApi::start(500);
 
-    let sent = sandbox.run(&up, &["Fine task"]);
-    let rejected_by_api = sandbox.run(&down, &["Another task"]);
-    let unreachable = sandbox.run_with(Some("http://127.0.0.1:1"), Some("t"), &["Third task"], None);
-    let no_token = sandbox.run_with(Some(&up.url), None, &["Fourth task"], None);
-    let invalid = sandbox.run(&up, &["@work"]);
+    let sent = sandbox.run(&up, &["add", "Fine task"]);
+    let rejected_by_api = sandbox.run(&down, &["add", "Another task"]);
+    let unreachable = sandbox.run_with(Some("http://127.0.0.1:1"), Some("t"), &["add", "Third task"], None);
+    let no_token = sandbox.run_with(Some(&up.url), None, &["add", "Fourth task"], None);
+    let invalid = sandbox.run(&up, &["add", "@work"]);
     let help = sandbox.run_with(None, None, &["--help"], None);
     let version = sandbox.run_with(None, None, &["--version"], None);
 
@@ -620,7 +621,7 @@ fn running_with_nothing_to_send_succeeds_and_sends_nothing() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("empty-stdin");
 
-    let output = sandbox.run_stdin(&api, &[], "");
+    let output = sandbox.run_stdin(&api, &["add"], "");
 
     assert_eq!(code(&output), 0);
     assert!(api.requests().is_empty());
@@ -632,7 +633,7 @@ fn queued_tasks_that_can_never_be_sent_are_dropped_and_shown() {
     let sandbox = Sandbox::new("stuck-queue");
     sandbox.write_queue(&["Stuck @work @home", "Valid queued task @home", "@work .urgent"]);
 
-    let output = sandbox.run(&api, &["New task"]);
+    let output = sandbox.run(&api, &["add", "New task"]);
 
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     let titles: Vec<String> = api.posted_tasks().iter().map(|t| t["title"].as_str().unwrap().to_string()).collect();
@@ -650,13 +651,13 @@ fn a_queued_task_that_is_only_failing_to_send_is_kept() {
     sandbox.write_queue(&["Waiting task"]);
     let down = MockApi::start(500);
 
-    sandbox.run(&down, &["Another"]);
+    sandbox.run(&down, &["add", "Another"]);
 
     assert_eq!(sandbox.queued_tasks(), vec!["Waiting task", "Another"]);
 }
 
 #[test]
-fn add_is_an_explicit_spelling_of_the_default_command() {
+fn add_creates_a_task_from_arguments_or_from_stdin() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("add-command");
 
@@ -684,15 +685,15 @@ fn add_help_prints_the_help_and_does_not_create_a_task() {
 }
 
 #[test]
-fn a_task_starting_with_a_command_word_is_created_with_add_double_dash_or_quotes() {
+fn after_add_a_task_may_start_with_any_word_including_command_names() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("command-word-tasks");
 
     sandbox.run(&api, &["add", "search", "the", "attic"]);
-    sandbox.run(&api, &["--", "refresh", "the", "roof"]);
-    sandbox.run(&api, &["search the garage"]);
+    sandbox.run(&api, &["add", "--", "refresh", "the", "roof"]);
+    sandbox.run(&api, &["add", "search the garage"]);
     sandbox.run(&api, &["add", "--", "--version", "bump"]);
-    sandbox.run(&api, &["buy", "add", "milk"]);
+    sandbox.run(&api, &["add", "buy", "add", "milk"]);
 
     let titles: Vec<String> = api.posted_tasks().iter().map(|t| t["title"].as_str().unwrap().to_string()).collect();
     assert_eq!(
@@ -702,7 +703,7 @@ fn a_task_starting_with_a_command_word_is_created_with_add_double_dash_or_quotes
 }
 
 #[test]
-fn an_unquoted_command_word_runs_the_command_and_creates_no_task() {
+fn search_with_no_copy_asks_for_a_refresh_and_creates_no_task() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("command-word-runs");
 
@@ -722,7 +723,7 @@ fn the_token_is_read_from_the_token_file_when_the_environment_has_none() {
     let sandbox = Sandbox::new("token-file");
     sandbox.write_token_file("# my token\nexport OTHER=x\nexport GODSPEED_TOKEN=\"file-token\"\n");
 
-    sandbox.run_with(Some(&api.url), None, &["Task using the file token"], None);
+    sandbox.run_with(Some(&api.url), None, &["add", "Task using the file token"], None);
 
     assert_eq!(authorization_of_post(&api).as_deref(), Some("Bearer file-token"));
 }
@@ -733,7 +734,7 @@ fn the_environment_token_wins_over_the_token_file() {
     let sandbox = Sandbox::new("token-env-wins");
     sandbox.write_token_file("export GODSPEED_TOKEN=\"file-token\"\n");
 
-    sandbox.run_with(Some(&api.url), Some("env-token"), &["Task"], None);
+    sandbox.run_with(Some(&api.url), Some("env-token"), &["add", "Task"], None);
 
     assert_eq!(authorization_of_post(&api).as_deref(), Some("Bearer env-token"));
 }
@@ -744,7 +745,7 @@ fn an_empty_environment_token_falls_back_to_the_token_file() {
     let sandbox = Sandbox::new("token-env-empty");
     sandbox.write_token_file("GODSPEED_TOKEN=file-token\n");
 
-    sandbox.run_with(Some(&api.url), Some("  "), &["Task"], None);
+    sandbox.run_with(Some(&api.url), Some("  "), &["add", "Task"], None);
 
     assert_eq!(authorization_of_post(&api).as_deref(), Some("Bearer file-token"));
 }
@@ -755,7 +756,7 @@ fn a_token_file_without_a_token_line_is_the_same_as_no_token() {
     let sandbox = Sandbox::new("token-file-empty");
     sandbox.write_token_file("# nothing here\nOTHER=x\n");
 
-    let output = sandbox.run_with(Some(&api.url), None, &["Task"], None);
+    let output = sandbox.run_with(Some(&api.url), None, &["add", "Task"], None);
 
     assert!(stderr(&output).contains("environment/Godspeed"), "{}", stderr(&output));
     assert!(api.requests().is_empty());
@@ -767,8 +768,8 @@ fn the_token_never_appears_in_the_output() {
     sandbox.write_token_file("export GODSPEED_TOKEN=\"super-secret-file-token\"\n");
     let down = MockApi::start(500);
 
-    let from_file = sandbox.run_with(Some(&down.url), None, &["Failing task"], None);
-    let from_env = sandbox.run_with(Some(&down.url), Some("super-secret-env-token"), &["Failing task"], None);
+    let from_file = sandbox.run_with(Some(&down.url), None, &["add", "Failing task"], None);
+    let from_env = sandbox.run_with(Some(&down.url), Some("super-secret-env-token"), &["add", "Failing task"], None);
 
     for output in [from_file, from_env] {
         let all = format!("{}{}", stdout(&output), stderr(&output));
@@ -1237,18 +1238,6 @@ fn search_help_documents_the_syntax_and_needs_nothing() {
     }
 }
 
-#[test]
-fn a_task_can_still_be_created_whose_text_starts_with_search() {
-    let api = MockApi::start(200);
-    let sandbox = Sandbox::new("create-search-task");
-
-    sandbox.run(&api, &["add", "search", "the", "attic"]);
-    sandbox.run(&api, &["search the garage"]);
-
-    let titles: Vec<String> = api.posted_tasks().iter().map(|t| t["title"].as_str().unwrap().to_string()).collect();
-    assert_eq!(titles, vec!["search the attic", "search the garage"]);
-}
-
 // ---- the operators guide ----
 
 #[test]
@@ -1704,7 +1693,7 @@ fn creating_a_task_ignores_the_config_file() {
     let sandbox = Sandbox::new("config-ignored-by-add");
     sandbox.write_config("this is not toml at all [[[\n");
 
-    let output = sandbox.run(&api, &["Buy milk"]);
+    let output = sandbox.run(&api, &["add", "Buy milk"]);
 
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     assert_eq!(api.posted_tasks().len(), 1);
@@ -1906,4 +1895,481 @@ fn a_refresh_from_search_leaves_stdout_for_the_results_only() {
     let parsed: Value = serde_json::from_str(&stdout(&output)).expect("stdout is only the JSON results");
     assert_eq!(parsed.as_array().unwrap().len(), 1);
     assert!(stderr(&output).contains("Fetched"), "{}", stderr(&output));
+}
+
+// ---- a task is only ever created with `add` ----
+
+#[test]
+fn a_bare_word_is_not_a_command_and_creates_nothing() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("bare-word");
+    sandbox.write_queue(&["Queued earlier"]);
+
+    let output = sandbox.run(&api, &["string"]);
+
+    assert_eq!(code(&output), 2);
+    assert!(stdout(&output).is_empty());
+    let message = stderr(&output);
+    assert!(message.contains("'string' isn't a valid godspeed-cli command"), "{message}");
+    assert!(message.contains("godspeed-cli add \"string\""), "{message}");
+    assert!(message.contains("add, refresh, search, completions"), "{message}");
+    assert!(!message.contains("GODSPEED_TOKEN"), "it fails before looking at the token: {message}");
+    assert!(api.requests().is_empty(), "nothing is sent, and the queue isn't retried");
+    assert_eq!(sandbox.queued_tasks(), vec!["Queued earlier"]);
+}
+
+#[test]
+fn a_task_written_without_add_is_an_error_however_it_is_quoted() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("bare-task");
+
+    let quoted = sandbox.run(&api, &["Buy milk @home ~10m"]);
+    let words = sandbox.run(&api, &["Buy", "milk", "@home"]);
+    let command_word = sandbox.run(&api, &["search the attic"]);
+    let piped = sandbox.run_stdin(&api, &[], "Buy milk");
+
+    assert_eq!(code(&quoted), 2);
+    assert!(stderr(&quoted).contains("'Buy milk @home ~10m' isn't a valid godspeed-cli command"), "{}", stderr(&quoted));
+    assert_eq!(code(&words), 2);
+    assert!(stderr(&words).contains("'Buy' isn't a valid godspeed-cli command"), "{}", stderr(&words));
+    assert_eq!(code(&command_word), 2);
+    assert!(stderr(&command_word).contains("'search the attic' isn't a valid godspeed-cli command"));
+    assert_eq!(code(&piped), 2, "stdin alone is not enough either");
+    assert!(stderr(&piped).contains("no command given"), "{}", stderr(&piped));
+    assert!(api.requests().is_empty());
+    assert!(sandbox.queued_tasks().is_empty());
+}
+
+#[test]
+fn no_arguments_is_an_error_that_lists_the_commands() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("no-arguments");
+
+    let output = sandbox.run_with(Some(&api.url), Some("test-token"), &[], None);
+
+    assert_eq!(code(&output), 2);
+    assert!(stderr(&output).contains("no command given"), "{}", stderr(&output));
+    assert!(stderr(&output).contains("add, refresh, search, completions"), "{}", stderr(&output));
+    assert!(stdout(&output).is_empty());
+    assert!(api.requests().is_empty());
+}
+
+#[test]
+fn an_unknown_option_is_an_error_and_so_is_a_double_dash_without_add() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("unknown-option");
+
+    let option = sandbox.run(&api, &["--nope"]);
+    let dashes = sandbox.run(&api, &["--", "Buy", "milk"]);
+    let json = sandbox.run(&api, &["--json", "Buy milk"]);
+
+    assert_eq!(code(&option), 2);
+    assert!(stderr(&option).contains("'--nope' isn't a valid godspeed-cli option"), "{}", stderr(&option));
+    assert!(!stderr(&option).contains("To create a task"));
+    assert_eq!(code(&dashes), 2);
+    assert_eq!(code(&json), 2);
+    assert!(api.requests().is_empty());
+}
+
+#[test]
+fn command_names_are_case_sensitive_and_only_the_first_word_counts() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("command-case");
+
+    for words in [["Add", "x"], ["SEARCH", "x"], ["buy", "add"], ["refreshing", "x"]] {
+        let output = sandbox.run(&api, &words);
+        assert_eq!(code(&output), 2, "{words:?}");
+        assert!(stderr(&output).contains("isn't a valid godspeed-cli command"), "{words:?}: {}", stderr(&output));
+    }
+    assert!(api.requests().is_empty());
+}
+
+#[test]
+fn after_add_the_first_word_can_be_anything_so_no_escaping_is_needed() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("add-anything");
+
+    sandbox.run(&api, &["add", "completions", "are", "due", "~5m"]);
+    sandbox.run(&api, &["add", "--version", "bump"]);
+    sandbox.run(&api, &["add", "--", "--version", "bump"]);
+
+    let tasks = api.posted_tasks();
+    assert_eq!(tasks[0]["title"], "completions are due");
+    assert_eq!(tasks[1]["title"], "--version bump", "only a lone `--help`, `-h`, `-V`, `--version`, `--json` or `--` first is an option");
+}
+
+#[test]
+fn the_help_describes_add_as_the_only_way_to_create_a_task() {
+    let sandbox = Sandbox::new("help-add-only");
+
+    let help = sandbox.run_with(None, None, &["--help"], None);
+
+    let text = stdout(&help);
+    assert!(text.contains("godspeed-cli add [--json] [--] <TASK>..."), "{text}");
+    assert!(text.contains("echo \"<TASK>\" | godspeed-cli add"), "{text}");
+    assert!(text.contains("There are no other commands"), "{text}");
+    assert!(!text.contains("default"), "add is no longer a default: {text}");
+    assert!(text.contains("completions"), "{text}");
+}
+
+// ---- completions ----
+
+#[test]
+fn each_supported_shell_gets_its_script_on_stdout_and_needs_nothing_else() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("completions-scripts");
+
+    for shell in ["bash", "zsh", "fish"] {
+        let output = sandbox.run_with(Some(&api.url), None, &["completions", shell], None);
+        assert_eq!(code(&output), 0, "{shell}: {}", stderr(&output));
+        let script = stdout(&output);
+        assert!(script.starts_with(&format!("# {shell} completion for godspeed-cli")), "{shell}: {script}");
+        assert!(script.contains("godspeed-cli __complete"), "{shell}");
+        assert!(stderr(&output).is_empty(), "{shell}: {}", stderr(&output));
+    }
+    assert!(api.requests().is_empty(), "no token and no network are needed");
+    assert!(!sandbox.data_home.join("godspeed-cli").exists(), "printing a script writes nothing");
+}
+
+#[test]
+fn an_unsupported_or_missing_shell_is_a_usage_error() {
+    let sandbox = Sandbox::new("completions-bad-shell");
+
+    let powershell = sandbox.run_with(None, None, &["completions", "powershell"], None);
+    let none = sandbox.run_with(None, None, &["completions"], None);
+    let two = sandbox.run_with(None, None, &["completions", "bash", "zsh"], None);
+    let upper = sandbox.run_with(None, None, &["completions", "Bash"], None);
+
+    assert_eq!(code(&powershell), 2);
+    assert!(stderr(&powershell).contains("'powershell' isn't a supported shell (supported: bash, fish, zsh)"), "{}", stderr(&powershell));
+    assert_eq!(code(&none), 2);
+    assert!(stderr(&none).contains("say which shell"), "{}", stderr(&none));
+    assert_eq!(code(&two), 2);
+    assert_eq!(code(&upper), 2);
+    for output in [powershell, none, two, upper] {
+        assert!(stdout(&output).is_empty());
+    }
+}
+
+#[test]
+fn completions_help_says_how_to_install_it() {
+    let sandbox = Sandbox::new("completions-help");
+
+    let output = sandbox.run_with(None, None, &["completions", "--help"], None);
+
+    assert_eq!(code(&output), 0);
+    let text = stdout(&output);
+    assert!(text.contains("eval \"$(godspeed-cli completions bash)\""), "{text}");
+    assert!(text.contains("godspeed-cli completions fish | source"), "{text}");
+    assert!(text.contains("WorkProjects"), "{text}");
+}
+
+fn names(sandbox: &Sandbox, kind: &str) -> Vec<String> {
+    let output = sandbox.run_with(None, None, &["__complete", kind], None);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    stdout(&output).lines().map(str::to_string).collect()
+}
+
+#[test]
+fn names_come_from_the_local_copy_without_spaces_sorted() {
+    let (sandbox, _api) = sample_copy("complete-names");
+
+    assert_eq!(names(&sandbox, "lists"), vec!["Home", "WorkProjects"]);
+    assert_eq!(names(&sandbox, "labels"), vec!["Low", "Urgent"]);
+}
+
+#[test]
+fn names_also_come_from_the_lists_and_labels_already_used_when_creating_tasks() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("complete-names-toml");
+    sandbox.run(&api, &["add", "Task @home .urgent"]);
+
+    // The creating-tasks caches hold names in lowercase.
+    assert_eq!(names(&sandbox, "lists"), vec!["home", "workprojects"]);
+    assert_eq!(names(&sandbox, "labels"), vec!["urgent", "writing"]);
+}
+
+#[test]
+fn the_copys_capitalisation_wins_over_the_lowercase_cache() {
+    let (sandbox, api) = sample_copy("complete-names-merge");
+    sandbox.run(&api, &["add", "Task @home .urgent"]);
+
+    assert_eq!(names(&sandbox, "lists"), vec!["Home", "WorkProjects"]);
+    assert_eq!(names(&sandbox, "labels"), vec!["Low", "Urgent", "writing"], "writing is only in the cache");
+}
+
+#[test]
+fn names_a_shell_could_misread_are_never_offered() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("complete-names-unsafe");
+    api.queue_page_with(
+        vec![one_task("a", 1)],
+        json!([
+            {"id": "l1", "name": "Fine"},
+            {"id": "l2", "name": "Evil $(touch pwned)"},
+            {"id": "l3", "name": "semi;colon"},
+            {"id": "l4", "name": "Back`tick`"},
+            {"id": "l5", "name": "Side Projects"},
+        ]),
+        json!([{"id": "x1", "name": "$(reboot)"}, {"id": "x2", "name": "ok-label"}]),
+    );
+    sandbox.run(&api, &["refresh"]);
+
+    assert_eq!(names(&sandbox, "lists"), vec!["Fine", "SideProjects"]);
+    assert_eq!(names(&sandbox, "labels"), vec!["ok-label"]);
+}
+
+#[test]
+fn asking_for_names_with_no_copy_or_the_wrong_kind_prints_nothing_and_no_error() {
+    let sandbox = Sandbox::new("complete-names-none");
+
+    assert!(names(&sandbox, "lists").is_empty());
+    assert!(names(&sandbox, "labels").is_empty());
+    let wrong = sandbox.run_with(None, None, &["__complete", "tasks"], None);
+    let missing = sandbox.run_with(None, None, &["__complete"], None);
+    for output in [wrong, missing] {
+        assert_eq!(code(&output), 2);
+        assert!(stdout(&output).is_empty() && stderr(&output).is_empty());
+    }
+}
+
+#[test]
+fn the_hidden_names_command_is_not_in_any_help() {
+    let sandbox = Sandbox::new("complete-hidden");
+    for args in [&["--help"][..], &["search", "--help"], &["completions", "--help"]] {
+        let output = sandbox.run_with(None, None, args, None);
+        assert!(!stdout(&output).contains("__complete"), "{args:?}");
+    }
+}
+
+/// bash, if there is one. It is also the shell the completion function is tested in: it is run
+/// for real with the variables bash sets while completing.
+const BASH: &str = "/bin/bash";
+
+fn have(shell: &str) -> bool {
+    Command::new(shell).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Runs the bash completion as bash would, for `line` typed so far with the cursor at its end.
+/// `words` is how bash would have cut the line into `COMP_WORDS`: the last is the word being
+/// completed. Returns the candidates.
+fn bash_complete(sandbox: &Sandbox, line: &str, words: &[&str]) -> Vec<String> {
+    let bin_dir = sandbox.data_home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let link = bin_dir.join("godspeed-cli");
+    if !link.exists() {
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_godspeed-cli"), &link).unwrap();
+    }
+    let script = r#"
+        eval "$(godspeed-cli completions bash)"
+        COMP_LINE=$TEST_LINE
+        COMP_POINT=${#COMP_LINE}
+        IFS=$'\x1f' read -r -a COMP_WORDS <<< "$TEST_WORDS"
+        # `read` drops a trailing empty word, which is the word being completed after a space.
+        [[ $TEST_WORDS == *$'\x1f' ]] && COMP_WORDS+=("")
+        COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))
+        _godspeed_cli
+        if (( ${#COMPREPLY[@]} )); then printf '%s\n' "${COMPREPLY[@]}"; fi
+    "#;
+    let output = Command::new(BASH)
+        .args(["--noprofile", "--norc", "-c", script])
+        .env_clear()
+        .env("HOME", &sandbox.data_home)
+        .env("XDG_DATA_HOME", &sandbox.data_home)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+        .env("TEST_LINE", line)
+        .env("TEST_WORDS", words.join("\x1f"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stderr.is_empty(), "completion must be silent: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8(output.stdout).unwrap().lines().map(str::to_string).collect()
+}
+
+macro_rules! needs_bash {
+    () => {
+        if !have(BASH) {
+            eprintln!("skipped: {BASH} is not available");
+            return;
+        }
+    };
+}
+
+#[test]
+fn bash_completes_commands_flags_and_shell_names() {
+    needs_bash!();
+    let (sandbox, _api) = sample_copy("bash-commands");
+
+    assert_eq!(
+        bash_complete(&sandbox, "godspeed-cli ", &["godspeed-cli", ""]),
+        vec!["add", "refresh", "search", "completions", "--help", "--version"]
+    );
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli re", &["godspeed-cli", "re"]), vec!["refresh"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli s", &["godspeed-cli", "s"]), vec!["search"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli --v", &["godspeed-cli", "--v"]), vec!["--version"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli completions ", &["godspeed-cli", "completions", ""]), vec!["bash", "fish", "zsh"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli completions z", &["godspeed-cli", "completions", "z"]), vec!["zsh"]);
+    assert_eq!(
+        bash_complete(&sandbox, "godspeed-cli refresh --", &["godspeed-cli", "refresh", "--"]),
+        vec!["--full", "--include-completed", "--json"]
+    );
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli refresh --i", &["godspeed-cli", "refresh", "--i"]), vec!["--include-completed"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --", &["godspeed-cli", "search", "--"]), vec!["--json", "--refresh", "--max-age"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --m", &["godspeed-cli", "search", "--m"]), vec!["--max-age"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli add --", &["godspeed-cli", "add", "--"]), vec!["--json"]);
+    assert!(bash_complete(&sandbox, "godspeed-cli add --r", &["godspeed-cli", "add", "--r"]).is_empty());
+    assert!(bash_complete(&sandbox, "godspeed-cli nonsense ", &["godspeed-cli", "nonsense", ""]).is_empty());
+}
+
+#[test]
+fn bash_completes_list_names_after_at_and_label_names_after_dot_in_add() {
+    needs_bash!();
+    let (sandbox, _api) = sample_copy("bash-add-names");
+
+    assert_eq!(
+        bash_complete(&sandbox, "godspeed-cli add Buy milk @", &["godspeed-cli", "add", "Buy", "milk", "@"]),
+        vec!["@Home", "@WorkProjects"]
+    );
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli add Buy @wo", &["godspeed-cli", "add", "Buy", "@wo"]), vec!["@WorkProjects"], "case doesn't matter");
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli add Buy @H", &["godspeed-cli", "add", "Buy", "@H"]), vec!["@Home"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli add Buy .", &["godspeed-cli", "add", "Buy", "."]), vec![".Low", ".Urgent"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli add Buy .u", &["godspeed-cli", "add", "Buy", ".u"]), vec![".Urgent"]);
+    assert!(bash_complete(&sandbox, "godspeed-cli add Buy @zzz", &["godspeed-cli", "add", "Buy", "@zzz"]).is_empty());
+    // An ordinary word, or an operator that isn't completed, offers nothing.
+    assert!(bash_complete(&sandbox, "godspeed-cli add Buy mi", &["godspeed-cli", "add", "Buy", "mi"]).is_empty());
+    assert!(bash_complete(&sandbox, "godspeed-cli add Buy ~", &["godspeed-cli", "add", "Buy", "~"]).is_empty());
+    assert!(bash_complete(&sandbox, "godspeed-cli add Buy :", &["godspeed-cli", "add", "Buy", ":"]).is_empty());
+    // `list:` is search syntax, not task syntax.
+    assert!(bash_complete(&sandbox, "godspeed-cli add list:", &["godspeed-cli", "add", "list", ":"]).is_empty());
+}
+
+#[test]
+fn bash_completes_list_and_label_names_in_search_whichever_way_bash_cuts_the_word() {
+    needs_bash!();
+    let (sandbox, _api) = sample_copy("bash-search-names");
+    let g = "godspeed-cli";
+
+    // `:` is one of bash's word breaks by default, so the name is a word of its own.
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search label:U", &[g, "search", "label", ":", "U"]), vec!["Urgent"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search label:", &[g, "search", "label", ":"]), vec![":Low", ":Urgent"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search list:W", &[g, "search", "list", ":", "W"]), vec!["WorkProjects"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search in:h", &[g, "search", "in", ":", "h"]), vec!["Home"]);
+    // Many people take `:` out of the word breaks, so the whole `label:U` is the word.
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search label:U", &[g, "search", "label:U"]), vec!["label:Urgent"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search list:", &[g, "search", "list:"]), vec!["list:Home", "list:WorkProjects"]);
+    // After ! - and an opening parenthesis.
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search !label:L", &[g, "search", "!label", ":", "L"]), vec!["Low"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search -label:L", &[g, "search", "-label", ":", "L"]), vec!["Low"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search (label:L", &[g, "search", "(", "label", ":", "L"]), vec!["Low"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search milk label:L", &[g, "search", "milk", "label", ":", "L"]), vec!["Low"]);
+    assert!(bash_complete(&sandbox, "godspeed-cli search label:zz", &[g, "search", "label", ":", "zz"]).is_empty());
+}
+
+#[test]
+fn bash_does_not_complete_due_has_or_other_operators() {
+    needs_bash!();
+    let (sandbox, _api) = sample_copy("bash-not-completed");
+    let g = "godspeed-cli";
+
+    for (line, words) in [
+        ("godspeed-cli search due:", vec![g, "search", "due", ":"]),
+        ("godspeed-cli search due:t", vec![g, "search", "due", ":", "t"]),
+        ("godspeed-cli search has:", vec![g, "search", "has", ":"]),
+        ("godspeed-cli search has:n", vec![g, "search", "has", ":", "n"]),
+        ("godspeed-cli search is:", vec![g, "search", "is", ":"]),
+        ("godspeed-cli search sort:", vec![g, "search", "sort", ":"]),
+        ("godspeed-cli search group:", vec![g, "search", "group", ":"]),
+        ("godspeed-cli search folder:", vec![g, "search", "folder", ":"]),
+        ("godspeed-cli search label-group:", vec![g, "search", "label-group", ":"]),
+        ("godspeed-cli search milk", vec![g, "search", "milk"]),
+        ("godspeed-cli search ", vec![g, "search", ""]),
+        ("godspeed-cli search due:today", vec![g, "search", "due:today"]),
+    ] {
+        assert!(bash_complete(&sandbox, line, &words).is_empty(), "{line}");
+    }
+}
+
+#[test]
+fn bash_completes_inside_a_quoted_task_or_query() {
+    needs_bash!();
+    let (sandbox, _api) = sample_copy("bash-quoted");
+    let g = "godspeed-cli";
+
+    // bash gives the whole quoted text, opening quote included, as the word.
+    assert_eq!(
+        bash_complete(&sandbox, "godspeed-cli add \"Buy milk @Wo", &[g, "add", "\"Buy milk @Wo"]),
+        vec!["\"Buy milk @WorkProjects"]
+    );
+    assert_eq!(
+        bash_complete(&sandbox, "godspeed-cli add 'Buy milk .U", &[g, "add", "'Buy milk .U"]),
+        vec!["'Buy milk .Urgent"]
+    );
+    assert_eq!(
+        bash_complete(&sandbox, "godspeed-cli search 'due:today label:U", &[g, "search", "'due:today label:U"]),
+        vec!["'due:today label:Urgent"]
+    );
+    assert_eq!(
+        bash_complete(&sandbox, "godspeed-cli search \"(label:L", &[g, "search", "\"(label:L"]),
+        vec!["\"(label:Low"]
+    );
+    assert_eq!(
+        bash_complete(&sandbox, "godspeed-cli search '!list:H", &[g, "search", "'!list:H"]),
+        vec!["'!list:Home"]
+    );
+    assert!(bash_complete(&sandbox, "godspeed-cli add \"Buy mi", &[g, "add", "\"Buy mi"]).is_empty());
+}
+
+#[test]
+fn bash_completion_with_no_copy_offers_commands_but_no_names_and_says_nothing() {
+    needs_bash!();
+    let sandbox = Sandbox::new("bash-no-copy");
+
+    assert!(bash_complete(&sandbox, "godspeed-cli add Buy @", &["godspeed-cli", "add", "Buy", "@"]).is_empty());
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli re", &["godspeed-cli", "re"]), vec!["refresh"]);
+}
+
+#[test]
+fn bash_completion_never_runs_a_command_named_by_a_list() {
+    needs_bash!();
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("bash-injection");
+    let marker = sandbox.data_home.join("pwned");
+    let evil = format!("Evil $(touch {})", marker.display());
+    let evil_backtick = format!("`touch {}`", marker.display());
+    api.queue_page_with(
+        vec![one_task("a", 1)],
+        json!([{"id": "l1", "name": "Fine"}, {"id": "l2", "name": evil}, {"id": "l3", "name": evil_backtick}]),
+        json!([{"id": "x1", "name": format!("$(touch {})", marker.display())}]),
+    );
+    sandbox.run(&api, &["refresh"]);
+
+    let lists = bash_complete(&sandbox, "godspeed-cli add Buy @", &["godspeed-cli", "add", "Buy", "@"]);
+    let labels = bash_complete(&sandbox, "godspeed-cli add Buy .", &["godspeed-cli", "add", "Buy", "."]);
+    let search = bash_complete(&sandbox, "godspeed-cli search list:", &["godspeed-cli", "search", "list:"]);
+
+    assert_eq!(lists, vec!["@Fine"]);
+    assert!(labels.is_empty());
+    assert_eq!(search, vec!["list:Fine"]);
+    assert!(!marker.exists(), "a list name must never be run as a command");
+}
+
+#[test]
+fn the_generated_scripts_are_valid_for_the_shells_that_are_installed() {
+    let sandbox = Sandbox::new("script-syntax");
+    let mut checked = 0;
+    for (shell, check) in [("/bin/bash", "-n"), ("zsh", "-n"), ("fish", "--no-execute")] {
+        if !have(shell) {
+            eprintln!("skipped: {shell} is not installed");
+            continue;
+        }
+        let kind = shell.rsplit('/').next().unwrap();
+        let script = sandbox.run_with(None, None, &["completions", kind], None);
+        let file = sandbox.data_home.join(format!("completion.{kind}"));
+        fs::write(&file, stdout(&script)).unwrap();
+        let result = Command::new(shell).arg(check).arg(&file).output().unwrap();
+        assert!(result.status.success(), "{kind}: {}", String::from_utf8_lossy(&result.stderr));
+        checked += 1;
+    }
+    assert!(checked >= 1 || !have("/bin/bash"), "bash is checked whenever it exists");
 }

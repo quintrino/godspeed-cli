@@ -24,8 +24,15 @@ impl Named {
         self.name.to_lowercase() == wanted || (!self.id.is_empty() && self.id.to_lowercase() == wanted)
     }
 
+    /// Whether a name or id given in a query matches: part of the name, part of the name ignoring
+    /// spaces, slashes and dashes (so `workprojects` finds "Work Projects", the way shell
+    /// completion offers it), or the whole id.
     fn contains(&self, wanted: &str) -> bool {
-        self.name.to_lowercase().contains(wanted) || (!self.id.is_empty() && self.id.to_lowercase() == wanted)
+        let name = self.name.to_lowercase();
+        let squashed_wanted = squash(wanted);
+        name.contains(wanted)
+            || (!squashed_wanted.is_empty() && squash(&name).contains(&squashed_wanted))
+            || (!self.id.is_empty() && self.id.to_lowercase() == wanted)
     }
 }
 
@@ -80,6 +87,10 @@ fn moment(task: &Value, key: &str) -> Option<NaiveDateTime> {
 
 fn latest(task: &Value, keys: &[&str]) -> Option<NaiveDateTime> {
     keys.iter().filter_map(|key| moment(task, key)).max()
+}
+
+fn squash(value: &str) -> String {
+    value.chars().filter(|c| !matches!(c, ' ' | '/' | '-')).collect()
 }
 
 fn compare<T: Ord>(left: T, cmp: Cmp, right: T) -> bool {
@@ -461,6 +472,27 @@ mod tests {
         assert!(hit("label:x-low", &t));
         assert!(!hit("label:x-lo", &t));
         assert!(!hit("label:high", &t));
+    }
+
+    #[test]
+    fn names_match_without_their_spaces_too() {
+        let ctx = Context::new(
+            &[json!({"id": "l1", "name": "Work Projects"})],
+            &[json!({"id": "x1", "name": "High-Priority"})],
+            now(),
+        );
+        let t = task(json!({"id": "w", "title": "x", "list_id": "l1", "label_ids": ["x1"]}));
+        let hit_in = |query: &str| {
+            let q = parse(&[query.to_string()], now()).unwrap();
+            ctx.matches(&q.expr, &t)
+        };
+        assert!(hit_in("list:workprojects"));
+        assert!(hit_in("in:work-projects"));
+        assert!(hit_in("label:highpriority"));
+        assert!(hit_in("label:high-priority"));
+        assert!(hit_in("label:priority"));
+        assert!(!hit_in("list:projectswork"));
+        assert!(!hit_in("list:-"), "a query that is only separators matches nothing special");
     }
 
     #[test]
