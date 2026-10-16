@@ -95,10 +95,20 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
           tag="v${version}-build.${{ github.run_number }}"
+
+          # The notes are this version's section of CHANGELOG.md. If there is none, fall back to the
+          # notes GitHub generates from the commits, and say so, rather than stopping a release.
+          if bash scripts/release-notes.sh "$version" > release-notes.md; then
+            notes=(--notes-file release-notes.md)
+          else
+            echo "::warning::CHANGELOG.md has no notes for $version, so GitHub's generated notes are used"
+            notes=(--generate-notes)
+          fi
+
           gh release create "$tag" dist/* \
             --target "${{ github.sha }}" \
             --title "$tag" \
-            --generate-notes
+            "${notes[@]}"
 
       - name: Update Homebrew tap
         env:

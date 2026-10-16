@@ -138,6 +138,7 @@ Flags override it, and a mistake in the file is an error that names the file.
 
 - The code is split into modules, and the release workflow now runs the tests on Ubuntu and macOS before building or publishing anything.
 - The build binary is no longer tracked in git.
+- The notes on each GitHub release are now this file's section for the version being released, instead of generated ones.
 
 ## 0.1.0
 
