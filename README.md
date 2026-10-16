@@ -1,5 +1,7 @@
 # Godspeed CLI User Guide
 
+> Upgrading from 0.1.x? A task is now created with `godspeed-cli add "..."`. See the [changelog](CHANGELOG.md) for this and everything else that changed.
+
 A lightweight command-line utility for quickly creating tasks in [Godspeed App](https://godspeedapp.com/), and for searching them offline.
 
 ## Installation
