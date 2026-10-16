@@ -117,7 +117,7 @@ Flags override it, and a mistake in the file is an error that names the file.
 
 ### Known limitations, and what has not been verified
 
-**Please read these.** The test suite is large (about 470 tests, including end-to-end tests that run the real program against a mock of the API), but a mock isn't Godspeed:
+**Please read these.** The test suite is large (about 480 tests, including end-to-end tests that run the real program against a mock of the API), but a mock isn't Godspeed:
 
 - **Not yet checked against a real account:**
   - the API's `updated_after` filter, which incremental refresh depends on (`refresh --full` always gives the true picture);
@@ -138,7 +138,7 @@ Flags override it, and a mistake in the file is an error that names the file.
 
 - The code is split into modules, and the release workflow now runs the tests on Ubuntu and macOS before building or publishing anything.
 - The build binary is no longer tracked in git.
-- The notes on each GitHub release are now this file's section for the version being released, instead of generated ones.
+- The notes on each GitHub release are now this file's section for the version being released (`## X.Y.Z`), instead of generated ones. `bash scripts/release-notes.sh X.Y.Z` prints what a release would use. A test fails if this file has no section for the version in `Cargo.toml`, so write the notes before bumping the version; if a release is made without them anyway, it falls back to the notes GitHub generates and says so in the workflow log.
 
 ## 0.1.0
 
