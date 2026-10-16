@@ -36,6 +36,20 @@ pub struct Counts {
     pub labels: usize,
 }
 
+/// What is known about the copy, kept in the store next to the data so it can be trusted.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Facts {
+    /// When the copy was last refreshed, fully or incrementally (RFC 3339).
+    pub refreshed_at: Option<String>,
+    /// When it was last rebuilt from scratch.
+    pub last_full_refresh_at: Option<String>,
+    /// Whether the copy holds completed tasks.
+    pub include_completed: Option<bool>,
+    /// The newest `updated_at` among the tasks, as the API wrote it: an incremental refresh
+    /// asks for what changed after this.
+    pub high_water: Option<String>,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -45,6 +59,13 @@ impl Store {
         let store = Store { conn: Connection::open(path)? };
         store.migrate()?;
         Ok(store)
+    }
+
+    #[cfg(test)]
+    pub fn in_memory() -> Store {
+        let store = Store { conn: Connection::open_in_memory().unwrap() };
+        store.migrate().unwrap();
+        store
     }
 
     fn migrate(&self) -> Result<()> {
@@ -84,12 +105,13 @@ impl Store {
         Ok(())
     }
 
-    /// Replaces everything in the store with `snapshot`, all or nothing.
-    pub fn replace_all(&mut self, snapshot: &Snapshot, refreshed_at: &str) -> Result<Counts> {
+    /// Replaces everything in the store, facts included, with `snapshot`, all or nothing.
+    pub fn replace_all(&mut self, snapshot: &Snapshot, facts: &Facts) -> Result<Counts> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM tasks", [])?;
         tx.execute("DELETE FROM lists", [])?;
         tx.execute("DELETE FROM labels", [])?;
+        tx.execute("DELETE FROM metadata", [])?;
 
         for task in &snapshot.tasks {
             if let Some(id) = string_field(&task.json, "id") {
@@ -117,12 +139,75 @@ impl Store {
             }
         }
 
-        tx.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('refreshed_at', ?1)",
-            params![refreshed_at],
-        )?;
+        write_facts(&tx, facts)?;
         tx.commit()?;
         self.counts()
+    }
+
+    /// Applies what changed since the last refresh: adds or updates the tasks in `snapshot`,
+    /// and the lists and labels, leaving everything else alone. Tasks that are completed are
+    /// removed instead unless `include_completed`. Returns the counts afterwards and how many
+    /// tasks were in `snapshot`. The facts given are written; the others are kept.
+    pub fn apply_changes(
+        &mut self,
+        snapshot: &Snapshot,
+        include_completed: bool,
+        facts: &Facts,
+    ) -> Result<(Counts, usize)> {
+        let tx = self.conn.transaction()?;
+        let mut changed = std::collections::HashSet::new();
+        for task in &snapshot.tasks {
+            let Some(id) = string_field(&task.json, "id") else { continue };
+            if task.complete && !include_completed {
+                tx.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+            } else {
+                tx.execute(
+                    "INSERT INTO tasks (id, json, is_complete, updated_at) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(id) DO UPDATE SET json = excluded.json, is_complete = excluded.is_complete,
+                                                   updated_at = excluded.updated_at",
+                    params![
+                        id,
+                        serde_json::to_string(&task.json)?,
+                        i64::from(task.complete),
+                        string_field(&task.json, "updated_at"),
+                    ],
+                )?;
+            }
+            changed.insert(id);
+        }
+        for (table, values) in [("lists", &snapshot.lists), ("labels", &snapshot.labels)] {
+            for value in values {
+                if let Some(id) = string_field(value, "id") {
+                    // Update in place, so a list keeps its position in the sidebar order.
+                    tx.execute(
+                        &format!(
+                            "INSERT INTO {table} (id, json) VALUES (?1, ?2)
+                             ON CONFLICT(id) DO UPDATE SET json = excluded.json"
+                        ),
+                        params![id, serde_json::to_string(value)?],
+                    )?;
+                }
+            }
+        }
+        write_facts(&tx, facts)?;
+        tx.commit()?;
+        Ok((self.counts()?, changed.len()))
+    }
+
+    pub fn facts(&self) -> Result<Facts> {
+        let get = |key: &str| -> Result<Option<String>> {
+            match self.conn.query_row("SELECT value FROM metadata WHERE key = ?1", params![key], |row| row.get::<_, String>(0)) {
+                Ok(value) => Ok(Some(value)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        };
+        Ok(Facts {
+            refreshed_at: get("refreshed_at")?,
+            last_full_refresh_at: get("last_full_refresh_at")?,
+            include_completed: get("include_completed")?.map(|value| value == "true"),
+            high_water: get("high_water")?,
+        })
     }
 
     /// Cached tasks, most recently updated first. Completed ones only if `include_completed`.
@@ -168,14 +253,7 @@ impl Store {
 
     /// When `refresh` last wrote the copy, as an RFC 3339 string. None if it never has.
     pub fn refreshed_at(&self) -> Result<Option<String>> {
-        let found = self.conn.query_row("SELECT value FROM metadata WHERE key = 'refreshed_at'", [], |row| {
-            row.get::<_, String>(0)
-        });
-        match found {
-            Ok(value) => Ok(Some(value)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        Ok(self.facts()?.refreshed_at)
     }
 
     pub fn counts(&self) -> Result<Counts> {
@@ -187,6 +265,21 @@ impl Store {
     }
 }
 
+fn write_facts(tx: &rusqlite::Transaction<'_>, facts: &Facts) -> Result<()> {
+    let entries = [
+        ("refreshed_at", facts.refreshed_at.clone()),
+        ("last_full_refresh_at", facts.last_full_refresh_at.clone()),
+        ("include_completed", facts.include_completed.map(|b| b.to_string())),
+        ("high_water", facts.high_water.clone()),
+    ];
+    for (key, value) in entries {
+        if let Some(value) = value {
+            tx.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)", params![key, value])?;
+        }
+    }
+    Ok(())
+}
+
 fn string_field(value: &Value, field: &str) -> Option<String> {
     value.get(field)?.as_str().map(ToString::to_string)
 }
@@ -195,6 +288,12 @@ fn string_field(value: &Value, field: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    impl Facts {
+        fn refreshed(at: &str) -> Facts {
+            Facts { refreshed_at: Some(at.to_string()), ..Default::default() }
+        }
+    }
 
     fn memory() -> Store {
         let store = Store { conn: Connection::open_in_memory().unwrap() };
@@ -222,7 +321,7 @@ mod tests {
             labels: vec![json!({"id": "x1", "name": "Low"}), json!({"id": "x2", "name": "High"})],
         };
 
-        let counts = store.replace_all(&snapshot, "2026-10-15T00:00:00Z").unwrap();
+        let counts = store.replace_all(&snapshot, &Facts::refreshed("2026-10-15T00:00:00Z")).unwrap();
 
         assert_eq!(counts, Counts { tasks: 2, lists: 1, labels: 2 });
         assert_eq!(refreshed_at(&store).as_deref(), Some("2026-10-15T00:00:00Z"));
@@ -232,7 +331,7 @@ mod tests {
     fn the_completion_flag_and_json_are_kept() {
         let mut store = memory();
         store
-            .replace_all(&Snapshot { tasks: vec![task("a", false), task("b", true)], ..Default::default() }, "t")
+            .replace_all(&Snapshot { tasks: vec![task("a", false), task("b", true)], ..Default::default() }, &Facts::refreshed("t"))
             .unwrap();
 
         let rows: Vec<(String, i64, String)> = store
@@ -253,9 +352,9 @@ mod tests {
     #[test]
     fn a_second_replace_discards_what_was_there_before() {
         let mut store = memory();
-        store.replace_all(&Snapshot { tasks: vec![task("a", false), task("b", false)], ..Default::default() }, "1").unwrap();
+        store.replace_all(&Snapshot { tasks: vec![task("a", false), task("b", false)], ..Default::default() }, &Facts::refreshed("1")).unwrap();
 
-        let counts = store.replace_all(&Snapshot { tasks: vec![task("c", false)], ..Default::default() }, "2").unwrap();
+        let counts = store.replace_all(&Snapshot { tasks: vec![task("c", false)], ..Default::default() }, &Facts::refreshed("2")).unwrap();
 
         assert_eq!(counts.tasks, 1);
         assert_eq!(refreshed_at(&store).as_deref(), Some("2"));
@@ -271,7 +370,7 @@ mod tests {
             labels: vec![],
         };
 
-        let counts = store.replace_all(&snapshot, "t").unwrap();
+        let counts = store.replace_all(&snapshot, &Facts::refreshed("t")).unwrap();
 
         assert_eq!(counts, Counts { tasks: 1, lists: 1, labels: 0 });
     }
@@ -293,7 +392,7 @@ mod tests {
             lists: vec![json!({"id": "l1", "name": "Inbox"})],
             labels: vec![json!({"id": "x1", "name": "Low"})],
         };
-        store.replace_all(&snapshot, "2026-10-15T00:00:00Z").unwrap();
+        store.replace_all(&snapshot, &Facts::refreshed("2026-10-15T00:00:00Z")).unwrap();
 
         let open: Vec<String> =
             store.tasks(false).unwrap().iter().map(|t| t.json["id"].as_str().unwrap().to_string()).collect();
@@ -318,11 +417,123 @@ mod tests {
             labels: vec![],
         };
 
-        store.replace_all(&snapshot, "t").unwrap();
+        store.replace_all(&snapshot, &Facts::refreshed("t")).unwrap();
 
         let names: Vec<String> =
             store.lists().unwrap().iter().map(|l| l["name"].as_str().unwrap().to_string()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    fn task_at(id: &str, title: &str, updated: &str, complete: bool) -> CachedTask {
+        CachedTask { json: json!({"id": id, "title": title, "updated_at": updated}), complete }
+    }
+
+    fn title_of(store: &Store, id: &str) -> Option<String> {
+        store
+            .tasks(true)
+            .unwrap()
+            .iter()
+            .find(|t| t.json["id"] == id)
+            .map(|t| t.json["title"].as_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn facts_are_stored_and_read_back() {
+        let mut store = memory();
+        assert_eq!(store.facts().unwrap(), Facts::default());
+        let facts = Facts {
+            refreshed_at: Some("2026-10-15T00:00:00Z".to_string()),
+            last_full_refresh_at: Some("2026-10-14T00:00:00Z".to_string()),
+            include_completed: Some(true),
+            high_water: Some("2026-10-13T12:00:00.123456Z".to_string()),
+        };
+
+        store.replace_all(&Snapshot::default(), &facts).unwrap();
+
+        assert_eq!(store.facts().unwrap(), facts);
+        let none = Facts { include_completed: Some(false), ..Default::default() };
+        store.replace_all(&Snapshot::default(), &none).unwrap();
+        assert_eq!(store.facts().unwrap(), none, "a full replace forgets facts it isn't given");
+    }
+
+    #[test]
+    fn apply_changes_updates_and_adds_tasks_and_leaves_the_rest() {
+        let mut store = memory();
+        let first = Snapshot {
+            tasks: vec![task_at("a", "Old A", "2026-01-01T00:00:00Z", false), task_at("b", "B", "2026-01-02T00:00:00Z", false)],
+            ..Default::default()
+        };
+        store.replace_all(&first, &Facts { last_full_refresh_at: Some("full".into()), ..Facts::refreshed("1") }).unwrap();
+
+        let changes = Snapshot {
+            tasks: vec![task_at("a", "New A", "2026-02-01T00:00:00Z", false), task_at("c", "C", "2026-02-02T00:00:00Z", false)],
+            ..Default::default()
+        };
+        let (counts, changed) = store.apply_changes(&changes, false, &Facts::refreshed("2")).unwrap();
+
+        assert_eq!((counts.tasks, changed), (3, 2));
+        assert_eq!(title_of(&store, "a").as_deref(), Some("New A"));
+        assert_eq!(title_of(&store, "b").as_deref(), Some("B"));
+        assert_eq!(title_of(&store, "c").as_deref(), Some("C"));
+        let facts = store.facts().unwrap();
+        assert_eq!(facts.refreshed_at.as_deref(), Some("2"));
+        assert_eq!(facts.last_full_refresh_at.as_deref(), Some("full"), "an incremental refresh keeps the last full time");
+    }
+
+    #[test]
+    fn a_task_completed_since_is_removed_unless_completed_tasks_are_kept() {
+        let open = || Snapshot { tasks: vec![task_at("a", "A", "2026-01-01T00:00:00Z", false)], ..Default::default() };
+        let done = || Snapshot { tasks: vec![task_at("a", "A", "2026-02-01T00:00:00Z", true)], ..Default::default() };
+
+        let mut without = memory();
+        without.replace_all(&open(), &Facts::refreshed("1")).unwrap();
+        let (counts, changed) = without.apply_changes(&done(), false, &Facts::refreshed("2")).unwrap();
+        assert_eq!((counts.tasks, changed), (0, 1));
+
+        let mut with = memory();
+        with.replace_all(&open(), &Facts::refreshed("1")).unwrap();
+        let (counts, _) = with.apply_changes(&done(), true, &Facts::refreshed("2")).unwrap();
+        assert_eq!(counts.tasks, 1);
+        assert_eq!(with.complete_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_reopened_task_becomes_incomplete_again() {
+        let mut store = memory();
+        let done = Snapshot { tasks: vec![task_at("a", "A", "2026-01-01T00:00:00Z", true)], ..Default::default() };
+        store.replace_all(&done, &Facts::refreshed("1")).unwrap();
+        let reopened = Snapshot { tasks: vec![task_at("a", "A", "2026-03-01T00:00:00Z", false)], ..Default::default() };
+
+        store.apply_changes(&reopened, true, &Facts::refreshed("2")).unwrap();
+
+        assert_eq!(store.complete_count().unwrap(), 0);
+        assert_eq!(store.tasks(false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn apply_changes_keeps_lists_in_their_order_updates_them_and_appends_new_ones() {
+        let mut store = memory();
+        let list = |id: &str, name: &str| json!({"id": id, "name": name});
+        let first = Snapshot { lists: vec![list("a", "A"), list("b", "B"), list("c", "C")], ..Default::default() };
+        store.replace_all(&first, &Facts::refreshed("1")).unwrap();
+
+        let changes = Snapshot { lists: vec![list("b", "B renamed"), list("d", "D")], labels: vec![json!({"id": "x", "name": "X"})], ..Default::default() };
+        let (counts, _) = store.apply_changes(&changes, false, &Facts::refreshed("2")).unwrap();
+
+        let names: Vec<String> = store.lists().unwrap().iter().map(|l| l["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, vec!["A", "B renamed", "C", "D"]);
+        assert_eq!((counts.lists, counts.labels), (4, 1));
+    }
+
+    #[test]
+    fn an_empty_change_set_only_updates_the_facts() {
+        let mut store = memory();
+        store.replace_all(&Snapshot { tasks: vec![task_at("a", "A", "2026-01-01T00:00:00Z", false)], ..Default::default() }, &Facts::refreshed("1")).unwrap();
+
+        let (counts, changed) = store.apply_changes(&Snapshot::default(), false, &Facts::refreshed("2")).unwrap();
+
+        assert_eq!((counts.tasks, changed), (1, 0));
+        assert_eq!(store.facts().unwrap().refreshed_at.as_deref(), Some("2"));
     }
 
     #[test]
@@ -334,7 +545,7 @@ mod tests {
             labels: vec![],
         };
 
-        assert_eq!(store.replace_all(&snapshot, "t").unwrap(), Counts { tasks: 0, lists: 0, labels: 0 });
+        assert_eq!(store.replace_all(&snapshot, &Facts::refreshed("t")).unwrap(), Counts { tasks: 0, lists: 0, labels: 0 });
     }
 
     #[test]
@@ -344,7 +555,7 @@ mod tests {
         let path = dir.join("cache.sqlite3");
         let _ = std::fs::remove_file(&path);
 
-        Store::open(&path).unwrap().replace_all(&Snapshot { tasks: vec![task("a", false)], ..Default::default() }, "t").unwrap();
+        Store::open(&path).unwrap().replace_all(&Snapshot { tasks: vec![task("a", false)], ..Default::default() }, &Facts::refreshed("t")).unwrap();
         assert_eq!(Store::open(&path).unwrap().counts().unwrap().tasks, 1);
 
         Connection::open(&path).unwrap().pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();

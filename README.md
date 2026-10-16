@@ -203,25 +203,69 @@ Agenda items:
 
 ## Refresh
 
-`godspeed-cli refresh` downloads your tasks, lists and labels into a local SQLite database, ready for [searching](#search).
+`godspeed-cli refresh` keeps a local copy of your tasks, lists and labels in a SQLite database, ready for [searching](#search).
 
 ```bash
-godspeed-cli refresh                      # incomplete tasks only
-godspeed-cli refresh --include-completed  # incomplete and completed tasks
-godspeed-cli refresh --json               # print the counts as JSON
+godspeed-cli refresh                      # bring the copy up to date
+godspeed-cli refresh --full               # rebuild the copy from scratch
+godspeed-cli refresh --include-completed  # also keep completed tasks
+godspeed-cli refresh --json               # print a report as JSON
 ```
 
+### Incremental and full refreshes
+
+- **The first refresh is a full one**: it downloads everything.
+- **After that, a refresh is incremental**: it asks only for tasks changed since the copy was last brought up to date, adds or updates them, and leaves the rest. That is usually two requests, so it takes a second or two however large the account.
+- **`--full` rebuilds the copy from scratch.** It downloads everything again and replaces the old copy.
+
 ```
-Refreshed 1432 tasks, 12 lists, 30 labels
+Refreshed 1432 tasks, 12 lists, 30 labels                                              (full)
+Updated 3 tasks since the last refresh; the copy now has 1435 tasks, 12 lists, 30 labels   (incremental)
 ```
 
-- It pages through the whole account (250 tasks per request) and shows progress on stderr, so `--json` output on stdout stays clean.
-- The Godspeed API limits reads, so the CLI makes at most 9 requests a minute and then waits. That is about 2,000 tasks a minute, so a few thousand tasks take a couple of minutes. If the API answers "too many requests", it waits as long as it asks and retries.
-- Each refresh **replaces** the previous copy. Everything is downloaded first, so if it fails part-way (exit status 1) the previous copy is kept.
-- Without `--include-completed`, completed tasks are not stored, and a refresh removes any that an earlier `--include-completed` refresh stored.
+An incremental refresh can't see everything: **a task deleted in Godspeed stays in the copy**, because the API only reports tasks that still exist. A full refresh drops them, so one happens by itself when:
+
+- you ask for it with `--full`;
+- there is no copy yet;
+- you switch `--include-completed` on or off (the copy has to be rebuilt to match);
+- the last full refresh is a week old (change this with `full_refresh_after`, below); or
+- the copy is missing the information an incremental refresh needs.
+
+Progress, including which kind of refresh it is and why, goes to stderr, so `--json` output on stdout stays clean. `--json` reports `mode` (`full` or `incremental`), `reason` (why it was full), `changed_count` (tasks fetched), the counts, `include_completed` and `refreshed_at`.
+
+### Details
+
+- A full refresh pages through the whole account, 250 tasks per request. The Godspeed API limits reads, so the CLI makes at most 9 requests a minute and then waits: about 2,000 tasks a minute, so a few thousand tasks take a couple of minutes. If the API answers "too many requests", it waits as long as it asks and retries.
+- Everything is downloaded before the copy is touched, so a refresh that fails part-way (exit status 1) leaves the previous copy exactly as it was.
+- An incremental refresh asks for changes from a minute before the newest change it has seen, so one that landed at the same moment isn't missed. Tasks fetched twice are harmless.
+- It always asks for completed tasks too, even without `--include-completed`: a task you completed since the last refresh only shows up as completed, and has to be removed from the copy. Without `--include-completed` it then isn't kept.
+- Lists and labels are updated in place, so a list keeps its place in the sidebar order; a new one goes at the end until the next full refresh.
 - Tasks that share exactly the same last-updated time are all kept unless more than 250 share it, which could only follow a bulk edit.
+- Not yet checked against a real account: the API's `updated_after` filter, which incremental refreshes depend on. If an incremental refresh ever seems to miss something, `--full` always gives the true picture.
 
-The database is `$XDG_DATA_HOME/godspeed-cli/cache.sqlite3`. It needs `GODSPEED_TOKEN` like creating tasks does.
+### What the database remembers
+
+The copy is `$XDG_DATA_HOME/godspeed-cli/cache.sqlite3`. Besides the tasks, lists and labels, it holds a few facts about itself, in its `metadata` table, so the program doesn't have to guess: `refreshed_at` (the last refresh of either kind), `last_full_refresh_at`, `include_completed` (whether the copy holds completed tasks) and `high_water` (the newest change seen, which an incremental refresh continues from). They are written together with the data, in the same transaction.
+
+The database needs `GODSPEED_TOKEN` to refresh, like creating tasks does.
+
+## Settings file
+
+An optional file, `$XDG_CONFIG_HOME/godspeed-cli/config.toml` (`~/.config/godspeed-cli/config.toml` if `XDG_CONFIG_HOME` is unset), sets defaults for `refresh` and `search`. Command-line flags override it, and creating tasks ignores it.
+
+```toml
+max_age = "12h"            # search refreshes first when the copy is older than this
+include_completed = true   # refresh keeps completed tasks as well
+full_refresh_after = "7d"  # a refresh is a full one when the last full one is this old
+```
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `max_age` | none | `search` refreshes first when the copy is older than this. Without it, `search` never refreshes by itself |
+| `include_completed` | `false` | `refresh` keeps completed tasks, as if `--include-completed` were given |
+| `full_refresh_after` | `"7d"` | How old the last full refresh may get before the next refresh is a full one. `"never"` turns it off |
+
+Durations are written like `30m`, `12h`, `1 day` or `1 day and 6 hours`. `"0"` means always, and `"never"` turns a setting off. A mistake in the file (an unknown setting, a value that isn't a duration) is an error that names the file, so a typo can't silently do nothing.
 
 ## Search
 
@@ -242,6 +286,22 @@ godspeed-cli search -label:Low --json
 Only incomplete tasks are searched. `is:uncleared` and `is:complete` bring in completed tasks, and they are only in the local copy if you refreshed with `--include-completed`. With no query, every incomplete task is listed.
 
 **Quote the query.** The arguments are joined with spaces into one query, so `search '(a | b) !c'` works but an unquoted `|` or `(` is taken by the shell. A phrase needs its own quotes inside the query: `search '"tax return"'`; `search "tax return"` means *tax* and *return*, in any order.
+
+### Keeping the copy fresh
+
+By default `search` only reads the copy, so it works offline and needs no token, but results are only as fresh as the last `refresh`. Two flags (and a setting) make it update the copy first:
+
+```bash
+godspeed-cli search --refresh 'due:today'      # refresh now, then search
+godspeed-cli search --max-age 6h 'due:today'   # refresh only if the copy is over 6 hours old
+godspeed-cli search --max-age never milk       # never, whatever the settings file says
+```
+
+- `--refresh` always updates the copy first. It is an ordinary refresh, so incremental when it can be (see [Refresh](#refresh)).
+- `--max-age AGE` updates it only if it is older than `AGE` (`30m`, `6h`, `"2 days"`; `0` means always). `max_age` in the [settings file](#settings-file) does the same without a flag, and `--max-age` overrides it.
+- Either needs `GODSPEED_TOKEN` and the network. **If the refresh can't be done**, `search` carries on with the existing copy and says why on stderr, so a search never fails just because you're offline. If there is no copy at all, it is an error (exit status 1).
+- A refresh from `search` never quietly drops completed tasks the copy already has, and a query using `is:complete` or `is:uncleared` makes it include them.
+- The refresh's progress goes to stderr; stdout holds only the results, so `--json` stays clean.
 
 ### The operators
 
@@ -426,7 +486,9 @@ All data is stored in `$XDG_DATA_HOME/godspeed-cli/` (typically `~/.local/share/
 
 - `cache`: Failed tasks waiting to be sent (plain text, separated by `-*-*-*-` lines)
 - `lists.toml`, `labels.toml`: Cached list and label name → ID mappings (TOML format)
-- `cache.sqlite3`: The local copy of your tasks, lists and labels, written by `refresh` (SQLite)
+- `cache.sqlite3`: The local copy of your tasks, lists and labels, and facts about it, written by `refresh` (SQLite)
+
+Optional settings are kept separately, in `$XDG_CONFIG_HOME/godspeed-cli/config.toml` (usually `~/.config/godspeed-cli/config.toml`); see [Settings file](#settings-file).
 
 ## Examples
 

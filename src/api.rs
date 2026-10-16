@@ -73,11 +73,20 @@ pub enum PageError {
 }
 
 /// Fetches up to 250 tasks with the given status (`incomplete` or `complete`), newest update
-/// first. `updated_before` continues from an earlier page.
-pub fn fetch_task_page(api_key: &str, status: &str, updated_before: Option<&str>) -> Result<TaskPage, PageError> {
+/// first. `updated_before` continues from an earlier page, and `updated_after` limits the tasks
+/// to those changed since then.
+pub fn fetch_task_page(
+    api_key: &str,
+    status: &str,
+    updated_before: Option<&str>,
+    updated_after: Option<&str>,
+) -> Result<TaskPage, PageError> {
     let mut query = vec![("status", status)];
     if let Some(before) = updated_before {
         query.push(("updated_before", before));
+    }
+    if let Some(after) = updated_after {
+        query.push(("updated_after", after));
     }
     let response = reqwest::blocking::Client::new()
         .get(api_url("tasks"))

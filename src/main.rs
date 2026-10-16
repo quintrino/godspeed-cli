@@ -1,5 +1,6 @@
 mod api;
 mod capture;
+mod config;
 mod dates;
 mod eval;
 mod exit;
@@ -24,20 +25,30 @@ USAGE:
     godspeed-cli [add] [--] <TASK>...
     godspeed-cli add --json [--] <TASK>...
     echo "<TASK>" | godspeed-cli
-    godspeed-cli refresh [--include-completed] [--json]
-    godspeed-cli search [--json] [QUERY]...
+    godspeed-cli refresh [--full] [--include-completed] [--json]
+    godspeed-cli search [--json] [--refresh] [--max-age AGE] [QUERY]...
     godspeed-cli --help | --version
 
 COMMANDS:
     add       Create a task. This is the default, so `add` can be left out. `add --json`
               prints the API's response to the task as JSON on success (as the first
               argument after `add`; use `add -- --json ...` for a task that starts with it).
-    refresh   Download all your tasks, lists and labels into a local cache (for searching).
-              Incomplete tasks only, unless --include-completed is given. Replaces the
-              previous copy, and keeps it if the download fails. --json prints the counts as
-              JSON. The API limits reads, so a large account can take several minutes.
+    refresh   Keep a local copy of your tasks, lists and labels, for searching. The first
+              refresh downloads everything; after that only what changed is fetched, which
+              is quick. --full rebuilds the copy from scratch (this also drops tasks deleted
+              in Godspeed, so it happens by itself when the last full refresh is a week old).
+              Incomplete tasks only, unless --include-completed is given; switching that on
+              or off does a full refresh. A failed refresh keeps the previous copy. --json
+              prints a report. The API limits reads, so a full refresh of a large account
+              can take several minutes.
     search    Search the local copy made by `refresh`, offline. Run
-              `godspeed-cli search --help` for the query syntax.
+              `godspeed-cli search --help` for the query syntax. --refresh updates the
+              copy first, and --max-age AGE does so if it is older than AGE.
+
+SETTINGS FILE:
+    $XDG_CONFIG_HOME/godspeed-cli/config.toml (usually ~/.config/godspeed-cli/config.toml)
+    is optional and can hold max_age, include_completed and full_refresh_after. Flags
+    override it. See the README.
 
     A first argument of exactly `add`, `refresh` or `search` is a command. To create a task
     whose text starts with one of those words, write `add search the attic` or quote the
@@ -78,7 +89,7 @@ const SEARCH_HELP: &str = r#"Search the local copy of your tasks made by `godspe
 The query language follows Godspeed's search operators guide.
 
 USAGE:
-    godspeed-cli search [--json] [QUERY]...
+    godspeed-cli search [--json] [--refresh] [--max-age AGE] [QUERY]...
 
 By default only incomplete tasks are searched. is:complete (not part of Godspeed's guide) and
 is:uncleared add completed tasks; they are only in the local copy if you refreshed with
@@ -168,6 +179,11 @@ NESTED AND DUPLICATE TASKS:
     enable:nested  disable:nested           Accepted, but results are always a flat list.
 
 OPTIONS:
+    --refresh            Update the local copy first (an incremental refresh when possible).
+                         Needs a token. If the refresh fails, the existing copy is searched, with
+                         a note on stderr.
+    --max-age AGE        Update the copy first if it is older than AGE, such as 30m, 6h, "2 days"
+                         or 0 (always). "never" turns off a max_age from the settings file.
     --json               Print the tasks as JSON (the full records, plus list_names and
                          label_names), or as {"group", "tasks"} objects when grouping. The
                          table shows the title (80 characters), list (12), due date and
@@ -414,7 +430,7 @@ mod tests {
             "sort:FIELD", "sort-asc:FIELD", "sort-desc:FIELD", "limit:N", "enable:duplicates", "disable:duplicates",
             "enable:nested", "disable:nested", "--json", "EXIT STATUS", "group:label:p0|p1|p2", "...rest",
             "group:due-or-start", "group:label-group", "modified", "sidebar", "None", "sort:label:High|Medium|Low",
-            "\"exact phrase\"", "in 3 days", "\"Oct 14th 12am\"",
+            "\"exact phrase\"", "in 3 days", "\"Oct 14th 12am\"", "--refresh", "--max-age AGE",
         ] {
             assert!(SEARCH_HELP.contains(text), "{text} is not in the search help");
         }
@@ -424,7 +440,7 @@ mod tests {
     fn the_help_text_covers_the_options_and_the_task_syntax() {
         for text in [
             "--help", "--version", "--", "GODSPEED_TOKEN", ".label", "@list", "~duration", ":date", "n: text",
-            "add", "EXIT STATUS", "search the attic", "refresh", "--include-completed", "search [--json]",
+            "add", "EXIT STATUS", "search the attic", "refresh", "--include-completed", "search [--json]", "--full", "--max-age", "SETTINGS FILE",
         ] {
             assert!(HELP.contains(text), "{text} is not in the help");
         }

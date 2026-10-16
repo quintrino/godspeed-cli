@@ -43,3 +43,21 @@ pub fn token_file_path() -> PathBuf {
 pub fn ensure_data_dir() -> io::Result<()> {
     fs::create_dir_all(data_dir())
 }
+
+pub fn config_home() -> PathBuf {
+    if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg);
+        }
+    }
+    if let Ok(home) = env::var("HOME") {
+        PathBuf::from(home).join(".config")
+    } else {
+        PathBuf::from(".config")
+    }
+}
+
+/// The optional settings file, `$XDG_CONFIG_HOME/godspeed-cli/config.toml`.
+pub fn config_path() -> PathBuf {
+    config_home().join("godspeed-cli").join("config.toml")
+}

@@ -179,6 +179,28 @@ impl Sandbox {
         fs::write(path, text).unwrap();
     }
 
+    /// Writes the settings file where the program looks for it when XDG_CONFIG_HOME is unset.
+    fn write_config(&self, text: &str) {
+        let path = self.data_home.join(".config/godspeed-cli/config.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    /// A fact the program keeps about the copy, in the cache database.
+    fn fact(&self, key: &str) -> Option<String> {
+        let connection = rusqlite::Connection::open(self.data_home.join("godspeed-cli/cache.sqlite3")).unwrap();
+        connection
+            .query_row("SELECT value FROM metadata WHERE key = ?1", [key], |row| row.get(0))
+            .ok()
+    }
+
+    fn set_fact(&self, key: &str, value: &str) {
+        let connection = rusqlite::Connection::open(self.data_home.join("godspeed-cli/cache.sqlite3")).unwrap();
+        connection
+            .execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)", [key, value])
+            .unwrap();
+    }
+
     fn stored_count(&self, table: &str) -> i64 {
         let connection = rusqlite::Connection::open(self.data_home.join("godspeed-cli/cache.sqlite3")).unwrap();
         connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap()
@@ -223,6 +245,17 @@ impl Sandbox {
     }
 
     fn run_with(&self, api_url: Option<&str>, token: Option<&str>, args: &[&str], stdin: Option<&str>) -> Output {
+        self.run_with_env(api_url, token, args, stdin, &[])
+    }
+
+    fn run_with_env(
+        &self,
+        api_url: Option<&str>,
+        token: Option<&str>,
+        args: &[&str],
+        stdin: Option<&str>,
+        extra_env: &[(&str, &str)],
+    ) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_godspeed-cli"));
         command
             .args(args)
@@ -232,6 +265,7 @@ impl Sandbox {
             .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        command.envs(extra_env.iter().copied());
         if let Some(url) = api_url {
             command.env("GODSPEED_API_URL", url);
         }
@@ -828,14 +862,14 @@ fn refresh_json_prints_only_the_report_on_stdout() {
 }
 
 #[test]
-fn a_new_refresh_replaces_the_previous_copy() {
+fn a_full_refresh_replaces_the_previous_copy() {
     let api = MockApi::start(200);
     let sandbox = Sandbox::new("refresh-replaces");
     api.queue_tasks_page(tasks_page(0..5));
     sandbox.run(&api, &["refresh"]);
     api.queue_tasks_page(tasks_page(10..12));
 
-    let output = sandbox.run(&api, &["refresh"]);
+    let output = sandbox.run(&api, &["refresh", "--full"]);
 
     assert_eq!(stdout(&output).trim(), "Refreshed 2 tasks, 2 lists, 1 labels");
     assert_eq!(sandbox.stored_count("tasks"), 2);
@@ -851,7 +885,7 @@ fn a_refresh_that_fails_part_way_leaves_the_previous_copy_alone() {
     api.queue_tasks_page(tasks_page(0..250));
     api.queue_tasks_status(500, None);
 
-    let output = sandbox.run(&api, &["refresh"]);
+    let output = sandbox.run(&api, &["refresh", "--full"]);
 
     assert_eq!(code(&output), 1);
     assert!(stderr(&output).contains("Refresh failed"), "{}", stderr(&output));
@@ -1431,4 +1465,442 @@ fn a_task_can_start_with_the_word_json_flag_using_double_dash() {
     assert!(stdout(&trailing).is_empty());
     let titles: Vec<String> = api.posted_tasks().iter().map(|t| t["title"].as_str().unwrap().to_string()).collect();
     assert_eq!(titles, vec!["--json format notes", "Convert to --json"]);
+}
+
+// ---- incremental and full refresh, the config file, and refreshing from search ----
+
+fn one_task(id: &str, minutes: i64) -> Value {
+    json!({"id": id, "title": format!("Task {id}"), "updated_at": minutes_ago(minutes)})
+}
+
+/// A sandbox, with a mock API, that has done its first (full) refresh of tasks 0..3.
+fn first_refresh(name: &str) -> (Sandbox, MockApi) {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new(name);
+    api.queue_tasks_page(tasks_page(0..3));
+    let output = sandbox.run(&api, &["refresh"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    (sandbox, api)
+}
+
+#[test]
+fn the_first_refresh_records_the_facts_about_the_copy_in_the_database() {
+    let (sandbox, _api) = first_refresh("facts");
+
+    assert_eq!(sandbox.fact("include_completed").as_deref(), Some("false"));
+    let refreshed_at = sandbox.fact("refreshed_at").expect("refreshed_at");
+    assert!(refreshed_at.ends_with('Z'), "{refreshed_at}");
+    assert_eq!(sandbox.fact("last_full_refresh_at").as_deref(), Some(refreshed_at.as_str()));
+    // The newest change among the tasks, as the API wrote it.
+    assert_eq!(sandbox.fact("high_water").as_deref(), Some(minutes_ago(0).as_str()));
+}
+
+#[test]
+fn the_next_refresh_asks_only_for_what_changed_and_adds_it_to_the_copy() {
+    let (sandbox, api) = first_refresh("incremental");
+    api.queue_tasks_page(vec![one_task("new1", -5)]);
+    api.queue_tasks_page(vec![]);
+
+    let output = sandbox.run(&api, &["refresh"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output).trim(),
+        "Updated 1 task since the last refresh; the copy now has 4 tasks, 2 lists, 1 labels"
+    );
+    // A minute before the newest change it had seen (08:00:00 -> 07:59:00).
+    let after = "2027-01-15T07%3A59%3A00.000000Z";
+    assert_eq!(
+        api.task_queries(),
+        vec![
+            "status=incomplete".to_string(),
+            format!("status=incomplete&updated_after={after}"),
+            format!("status=complete&updated_after={after}"),
+        ]
+    );
+    assert_eq!(sandbox.stored_count("tasks"), 4);
+    assert_eq!(sandbox.fact("high_water").as_deref(), Some(minutes_ago(-5).as_str()));
+    assert!(stderr(&output).contains("Incremental refresh: changes since 2027-01-15T07:59:00.000000Z"), "{}", stderr(&output));
+}
+
+#[test]
+fn an_incremental_refresh_updates_a_changed_task_in_place() {
+    let (sandbox, api) = first_refresh("incremental-edit");
+    let mut edited = one_task("t0001", -10);
+    edited["title"] = json!("Renamed");
+    api.queue_tasks_page(vec![edited]);
+    api.queue_tasks_page(vec![]);
+
+    let output = sandbox.run(&api, &["refresh"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(sandbox.stored_count("tasks"), 3, "an edit doesn't add a task");
+    let found = search(&sandbox, &["renamed", "--json"]);
+    assert_eq!(ids_in_json(&found), vec!["t0001"]);
+}
+
+#[test]
+fn a_task_completed_since_the_last_refresh_leaves_the_copy() {
+    let (sandbox, api) = first_refresh("incremental-completed");
+    api.queue_tasks_page(vec![]);
+    api.queue_tasks_page(vec![one_task("t0001", -10)]);
+
+    let output = sandbox.run(&api, &["refresh"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(stdout(&output).contains("Updated 1 task since"), "{}", stdout(&output));
+    assert_eq!(sandbox.stored_count("tasks"), 2);
+}
+
+#[test]
+fn json_says_whether_the_refresh_was_full_or_incremental_and_why() {
+    let (sandbox, api) = first_refresh("refresh-json-mode");
+    api.queue_tasks_page(vec![one_task("new1", -5), one_task("new2", -6)]);
+    api.queue_tasks_page(vec![]);
+
+    let incremental = sandbox.run(&api, &["refresh", "--json"]);
+
+    let report: Value = serde_json::from_str(&stdout(&incremental)).unwrap();
+    assert_eq!(report["mode"], "incremental");
+    assert_eq!(report["reason"], Value::Null);
+    assert_eq!(report["changed_count"], 2);
+    assert_eq!(report["tasks_count"], 5);
+
+    api.queue_tasks_page(tasks_page(0..4));
+    let full = sandbox.run(&api, &["refresh", "--full", "--json"]);
+    let report: Value = serde_json::from_str(&stdout(&full)).unwrap();
+    assert_eq!(report["mode"], "full");
+    assert_eq!(report["reason"], "asked for with --full");
+    assert_eq!(report["changed_count"], 4);
+    assert_eq!(report["tasks_count"], 4);
+}
+
+#[test]
+fn a_full_refresh_asks_for_everything_again_and_drops_tasks_that_no_longer_exist() {
+    let (sandbox, api) = first_refresh("full-flag");
+    api.queue_tasks_page(tasks_page(0..2));
+
+    let output = sandbox.run(&api, &["refresh", "--full"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim(), "Refreshed 2 tasks, 2 lists, 1 labels");
+    assert_eq!(api.task_queries(), vec!["status=incomplete", "status=incomplete"], "no updated_after");
+    assert_eq!(sandbox.stored_count("tasks"), 2);
+    assert!(stderr(&output).contains("Full refresh: asked for with --full"), "{}", stderr(&output));
+}
+
+#[test]
+fn changing_whether_completed_tasks_are_included_makes_the_refresh_full() {
+    let (sandbox, api) = first_refresh("completed-switch");
+    api.queue_tasks_page(tasks_page(0..3));
+    api.queue_tasks_page(tasks_page(100..102));
+
+    let output = sandbox.run(&api, &["refresh", "--include-completed", "--json"]);
+
+    let report: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(report["mode"], "full");
+    assert!(report["reason"].as_str().unwrap().contains("include completed tasks"), "{report}");
+    assert_eq!(report["include_completed"], true);
+    assert_eq!(api.task_queries()[1..], ["status=incomplete", "status=complete"], "no updated_after");
+    assert_eq!(sandbox.fact("include_completed").as_deref(), Some("true"));
+    assert_eq!(sandbox.stored_complete_count(), 2);
+}
+
+#[test]
+fn an_old_last_full_refresh_makes_the_next_refresh_full_automatically() {
+    let (sandbox, api) = first_refresh("aged");
+    sandbox.set_fact("last_full_refresh_at", "2020-01-01T00:00:00Z");
+    api.queue_tasks_page(tasks_page(0..2));
+
+    let output = sandbox.run(&api, &["refresh", "--json"]);
+
+    let report: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(report["mode"], "full");
+    assert!(report["reason"].as_str().unwrap().contains("last full refresh is old"), "{report}");
+    assert_eq!(sandbox.stored_count("tasks"), 2, "the deleted task is gone");
+}
+
+#[test]
+fn the_config_file_can_include_completed_tasks_by_default() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("config-completed");
+    sandbox.write_config("include_completed = true\n");
+    api.queue_tasks_page(tasks_page(0..2));
+    api.queue_tasks_page(tasks_page(100..101));
+
+    let output = sandbox.run(&api, &["refresh"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(api.task_queries(), vec!["status=incomplete", "status=complete"]);
+    assert_eq!(sandbox.stored_complete_count(), 1);
+    assert_eq!(sandbox.fact("include_completed").as_deref(), Some("true"));
+}
+
+#[test]
+fn full_refresh_after_in_the_config_file_sets_how_old_a_full_refresh_may_get() {
+    let (sandbox, api) = first_refresh("config-full-after");
+    sandbox.write_config("full_refresh_after = \"0\"\n");
+    api.queue_tasks_page(tasks_page(0..3));
+
+    let output = sandbox.run(&api, &["refresh", "--json"]);
+
+    let report: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(report["mode"], "full", "0 means every refresh is a full one");
+
+    sandbox.write_config("full_refresh_after = \"never\"\n");
+    sandbox.set_fact("last_full_refresh_at", "2000-01-01T00:00:00Z");
+    api.queue_tasks_page(vec![]);
+    api.queue_tasks_page(vec![]);
+    let never = sandbox.run(&api, &["refresh", "--json"]);
+    let report: Value = serde_json::from_str(&stdout(&never)).unwrap();
+    assert_eq!(report["mode"], "incremental", "never turns the automatic full refresh off");
+}
+
+#[test]
+fn the_config_file_is_found_under_xdg_config_home_when_that_is_set() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("config-xdg");
+    let config_home = sandbox.data_home.join("elsewhere");
+    fs::create_dir_all(config_home.join("godspeed-cli")).unwrap();
+    fs::write(config_home.join("godspeed-cli/config.toml"), "include_completed = true\n").unwrap();
+    api.queue_tasks_page(tasks_page(0..1));
+    api.queue_tasks_page(tasks_page(100..101));
+
+    let output = sandbox.run_with_env(
+        Some(&api.url),
+        Some("test-token"),
+        &["refresh"],
+        None,
+        &[("XDG_CONFIG_HOME", config_home.to_str().unwrap())],
+    );
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(api.task_queries(), vec!["status=incomplete", "status=complete"]);
+}
+
+#[test]
+fn a_mistake_in_the_config_file_is_reported_by_name_and_nothing_is_fetched() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("config-bad");
+    sandbox.write_config("max_ag = \"1h\"\n");
+
+    let refresh = sandbox.run(&api, &["refresh"]);
+    let search = sandbox.run(&api, &["search", "milk"]);
+
+    for output in [refresh, search] {
+        assert_eq!(code(&output), 2);
+        assert!(stderr(&output).contains("config.toml"), "{}", stderr(&output));
+        assert!(stderr(&output).contains("unknown setting 'max_ag'"), "{}", stderr(&output));
+    }
+    assert!(api.requests().is_empty());
+}
+
+#[test]
+fn creating_a_task_ignores_the_config_file() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("config-ignored-by-add");
+    sandbox.write_config("this is not toml at all [[[\n");
+
+    let output = sandbox.run(&api, &["Buy milk"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(api.posted_tasks().len(), 1);
+}
+
+/// A sandbox, with a mock API, whose copy was made from the sample tasks and lists.
+fn sample_copy(name: &str) -> (Sandbox, MockApi) {
+    let api = MockApi::start(200);
+    api.queue_page_with(incomplete_tasks(), search_lists(), search_labels());
+    let sandbox = Sandbox::new(name);
+    let output = sandbox.run(&api, &["refresh"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    (sandbox, api)
+}
+
+/// Runs `search` with a token and the mock API, so it is able to refresh.
+fn search_online(sandbox: &Sandbox, api: &MockApi, args: &[&str]) -> Output {
+    let mut full = vec!["search"];
+    full.extend_from_slice(args);
+    sandbox.run(api, &full)
+}
+
+fn new_task() -> Value {
+    json!({"id": "t-new", "title": "Brand new thing", "list_id": "list-home", "updated_at": "2026-03-10T00:00:00Z"})
+}
+
+#[test]
+fn search_refresh_brings_in_new_tasks_before_searching() {
+    let (sandbox, api) = sample_copy("search-refresh");
+    api.queue_page_with(vec![new_task()], search_lists(), search_labels());
+    api.queue_page_with(vec![], search_lists(), search_labels());
+
+    let before = search(&sandbox, &["brand", "--json"]);
+    let output = search_online(&sandbox, &api, &["--refresh", "brand", "--json"]);
+
+    assert!(ids_in_json(&before).is_empty());
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(ids_in_json(&output), vec!["t-new"]);
+    assert!(stderr(&output).contains("Incremental refresh"), "{}", stderr(&output));
+    assert_eq!(api.task_queries().len(), 3, "the first refresh and then one incremental refresh");
+}
+
+#[test]
+fn search_without_flags_or_settings_never_contacts_the_api() {
+    let (sandbox, api) = sample_copy("search-offline-by-default");
+    sandbox.set_fact("refreshed_at", "2020-01-01T00:00:00Z");
+
+    let output = search_online(&sandbox, &api, &["milk"]);
+
+    assert_eq!(code(&output), 0);
+    assert_eq!(api.task_queries().len(), 1, "only the first refresh");
+}
+
+#[test]
+fn search_max_age_refreshes_only_a_copy_that_is_older_than_that() {
+    let (sandbox, api) = sample_copy("search-max-age");
+
+    let fresh = search_online(&sandbox, &api, &["--max-age", "1d", "milk"]);
+    assert_eq!(code(&fresh), 0, "{}", stderr(&fresh));
+    assert_eq!(api.task_queries().len(), 1, "a copy refreshed moments ago is within a day");
+
+    sandbox.set_fact("refreshed_at", "2020-01-01T00:00:00Z");
+    api.queue_page_with(vec![new_task()], search_lists(), search_labels());
+    api.queue_page_with(vec![], search_lists(), search_labels());
+    let stale = search_online(&sandbox, &api, &["--max-age=1d", "brand", "--json"]);
+
+    assert_eq!(code(&stale), 0, "{}", stderr(&stale));
+    assert_eq!(api.task_queries().len(), 3);
+    assert_eq!(ids_in_json(&stale), vec!["t-new"]);
+}
+
+#[test]
+fn max_age_in_the_config_file_applies_unless_the_flag_overrides_it() {
+    let (sandbox, api) = sample_copy("search-config-max-age");
+    sandbox.write_config("max_age = \"1h\"\n");
+    sandbox.set_fact("refreshed_at", "2020-01-01T00:00:00Z");
+
+    let never = search_online(&sandbox, &api, &["--max-age", "never", "milk"]);
+    assert_eq!(code(&never), 0, "{}", stderr(&never));
+    assert_eq!(api.task_queries().len(), 1, "--max-age never overrides the file");
+
+    api.queue_page_with(vec![new_task()], search_lists(), search_labels());
+    api.queue_page_with(vec![], search_lists(), search_labels());
+    let by_config = search_online(&sandbox, &api, &["brand", "--json"]);
+    assert_eq!(ids_in_json(&by_config), vec!["t-new"], "{}", stderr(&by_config));
+    assert_eq!(api.task_queries().len(), 3);
+
+    // Just refreshed, so within the hour: no more requests.
+    let again = search_online(&sandbox, &api, &["brand"]);
+    assert_eq!(code(&again), 0);
+    assert_eq!(api.task_queries().len(), 3);
+}
+
+#[test]
+fn a_failed_refresh_from_search_falls_back_to_the_existing_copy_with_a_note() {
+    let (sandbox, api) = sample_copy("search-refresh-fails");
+    api.queue_tasks_status(500, None);
+
+    let output = search_online(&sandbox, &api, &["--refresh", "milk", "--json"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(ids_in_json(&output), vec!["t3"]);
+    assert!(stderr(&output).contains("the refresh failed"), "{}", stderr(&output));
+    assert!(stderr(&output).contains("searching the existing copy"), "{}", stderr(&output));
+}
+
+#[test]
+fn search_refresh_without_a_token_falls_back_to_the_existing_copy_with_a_note() {
+    let (sandbox, api) = sample_copy("search-refresh-no-token");
+
+    let output = sandbox.run_with(Some(&api.url), None, &["search", "--refresh", "milk", "--json"], None);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(ids_in_json(&output), vec!["t3"]);
+    assert!(stderr(&output).contains("GODSPEED_TOKEN is not set, so the copy can't be refreshed"), "{}", stderr(&output));
+    assert_eq!(api.task_queries().len(), 1);
+}
+
+#[test]
+fn search_refresh_with_no_copy_and_no_token_is_an_error() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("search-refresh-nothing");
+
+    let output = sandbox.run_with(Some(&api.url), None, &["search", "--refresh", "milk"], None);
+
+    assert_eq!(code(&output), 1);
+    assert!(stderr(&output).contains("no local copy") && stderr(&output).contains("GODSPEED_TOKEN"), "{}", stderr(&output));
+    assert!(api.requests().is_empty());
+}
+
+#[test]
+fn search_refresh_with_no_copy_makes_one_with_a_full_refresh_and_then_searches() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("search-refresh-first");
+    api.queue_page_with(incomplete_tasks(), search_lists(), search_labels());
+
+    let output = search_online(&sandbox, &api, &["--refresh", "milk", "--json"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(ids_in_json(&output), vec!["t3"]);
+    assert!(stderr(&output).contains("Full refresh: there is no local copy yet"), "{}", stderr(&output));
+    assert_eq!(api.task_queries(), vec!["status=incomplete"]);
+}
+
+#[test]
+fn a_refresh_from_search_keeps_completed_tasks_the_copy_already_has() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("search-keeps-completed");
+    api.queue_page_with(incomplete_tasks(), search_lists(), search_labels());
+    api.queue_page_with(completed_tasks(), search_lists(), search_labels());
+    sandbox.run(&api, &["refresh", "--include-completed"]);
+    assert_eq!(sandbox.stored_complete_count(), 1);
+    api.queue_page_with(vec![], search_lists(), search_labels());
+    api.queue_page_with(vec![], search_lists(), search_labels());
+
+    let output = search_online(&sandbox, &api, &["--refresh", "milk"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(stderr(&output).contains("Incremental refresh"), "{}", stderr(&output));
+    assert_eq!(sandbox.stored_complete_count(), 1, "the completed task is still there");
+    assert_eq!(sandbox.fact("include_completed").as_deref(), Some("true"));
+}
+
+#[test]
+fn a_search_for_completed_tasks_refreshes_with_them_included() {
+    let (sandbox, api) = sample_copy("search-wants-completed");
+    api.queue_page_with(incomplete_tasks(), search_lists(), search_labels());
+    api.queue_page_with(completed_tasks(), search_lists(), search_labels());
+
+    let output = search_online(&sandbox, &api, &["--refresh", "is:complete", "report", "--json"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(ids_in_json(&output), vec!["t4"]);
+    assert!(stderr(&output).contains("Full refresh"), "{}", stderr(&output));
+    assert_eq!(api.task_queries()[1..], ["status=incomplete", "status=complete"]);
+}
+
+#[test]
+fn a_bad_max_age_is_a_usage_error_and_nothing_is_fetched() {
+    let (sandbox, api) = sample_copy("search-bad-max-age");
+
+    let missing = search_online(&sandbox, &api, &["--max-age"]);
+    let bad = search_online(&sandbox, &api, &["--max-age", "soon", "milk"]);
+
+    assert_eq!(code(&missing), 2);
+    assert_eq!(code(&bad), 2);
+    assert!(stderr(&bad).contains("'soon' is not a duration"), "{}", stderr(&bad));
+    assert_eq!(api.task_queries().len(), 1);
+}
+
+#[test]
+fn a_refresh_from_search_leaves_stdout_for_the_results_only() {
+    let (sandbox, api) = sample_copy("search-refresh-stdout");
+    api.queue_page_with(vec![new_task()], search_lists(), search_labels());
+    api.queue_page_with(vec![], search_lists(), search_labels());
+
+    let output = search_online(&sandbox, &api, &["--refresh", "brand", "--json"]);
+
+    let parsed: Value = serde_json::from_str(&stdout(&output)).expect("stdout is only the JSON results");
+    assert_eq!(parsed.as_array().unwrap().len(), 1);
+    assert!(stderr(&output).contains("Fetched"), "{}", stderr(&output));
 }
