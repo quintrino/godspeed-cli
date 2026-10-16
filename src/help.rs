@@ -6,7 +6,7 @@ USAGE:
     godspeed-cli add [--json] [--] <TASK>...
     echo "<TASK>" | godspeed-cli add
     godspeed-cli refresh [--full] [--include-completed] [--json]
-    godspeed-cli search [--json] [--refresh] [--max-age AGE] [QUERY]...
+    godspeed-cli search [--json] [--refresh] [--max-age AGE] [--color WHEN] [QUERY]...
     godspeed-cli completions <bash|fish|zsh>
     godspeed-cli --help | --version
 
@@ -71,7 +71,7 @@ pub const SEARCH_HELP: &str = r#"Search the local copy of your tasks made by `go
 The query language follows Godspeed's search operators guide.
 
 USAGE:
-    godspeed-cli search [--json] [--refresh] [--max-age AGE] [QUERY]...
+    godspeed-cli search [--json] [--refresh] [--max-age AGE] [--color WHEN] [QUERY]...
 
 By default only incomplete tasks are searched. is:complete (not part of Godspeed's guide) and
 is:uncleared add completed tasks; they are only in the local copy if you refreshed with
@@ -170,6 +170,13 @@ OPTIONS:
                          a note on stderr.
     --max-age AGE        Update the copy first if it is older than AGE, such as 30m, 6h, "2 days"
                          or 0 (always). "never" turns off a max_age from the settings file.
+    --color WHEN         Show overdue tasks in red in the table. WHEN is auto (the default: only
+                         on a terminal, and not if NO_COLOR is set or TERM is dumb), always (for
+                         `| less -R`, and overriding NO_COLOR) or never. Only the table is
+                         coloured, never JSON. A task is overdue when its effective due date (the
+                         later of its due date and its snooze date) has passed: a date with no
+                         time from the day after, a date with a time once that time has passed.
+                         Completed tasks are never overdue.
     --json               Print the tasks as JSON (the full records, plus list_names and
                          label_names), or as {"group", "tasks"} objects when grouping. The
                          table shows the title (80 characters), list (12), due date and
@@ -231,7 +238,7 @@ mod tests {
             "sort:FIELD", "sort-asc:FIELD", "sort-desc:FIELD", "limit:N", "enable:duplicates", "disable:duplicates",
             "enable:nested", "disable:nested", "--json", "EXIT STATUS", "group:label:p0|p1|p2", "...rest",
             "group:due-or-start", "group:label-group", "modified", "sidebar", "None", "sort:label:High|Medium|Low",
-            "\"exact phrase\"", "in 3 days", "\"Oct 14th 12am\"", "--refresh", "--max-age AGE",
+            "\"exact phrase\"", "in 3 days", "\"Oct 14th 12am\"", "--refresh", "--max-age AGE", "--color WHEN", "NO_COLOR", "overdue",
         ] {
             assert!(SEARCH_HELP.contains(text), "{text} is not in the search help");
         }

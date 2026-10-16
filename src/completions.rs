@@ -157,9 +157,13 @@ _godspeed_cli() {
         refresh) COMPREPLY=($(compgen -W "--full --include-completed --json" -- "$cur")); return ;;
         completions) COMPREPLY=($(compgen -W "bash fish zsh" -- "$cur")); return ;;
         add) flags="--json" ;;
-        search) flags="--json --refresh --max-age" ;;
+        search) flags="--json --refresh --max-age --color" ;;
         *) return ;;
     esac
+    if [[ $cmd == search && ${COMP_WORDS[COMP_CWORD-1]} == --color ]]; then
+        COMPREPLY=($(compgen -W "auto always never" -- "$cur"))
+        return
+    fi
     if [[ $cur == --* ]]; then
         COMPREPLY=($(compgen -W "$flags" -- "$cur"))
         return
@@ -207,11 +211,15 @@ _godspeed_cli_names() {
 _godspeed_cli_words() {
     setopt localoptions extendedglob
     local cmd=$words[2]
+    if [[ $cmd == search && $words[CURRENT-1] == --color ]]; then
+        compadd -- auto always never
+        return
+    fi
     if [[ $PREFIX == --* ]]; then
         if [[ $cmd == add ]]; then
             compadd -- --json
         else
-            compadd -- --json --refresh --max-age
+            compadd -- --json --refresh --max-age --color
         fi
         return
     fi
@@ -315,6 +323,7 @@ complete -c godspeed-cli -n '__fish_seen_subcommand_from refresh' -l json -d 'Pr
 complete -c godspeed-cli -n '__fish_seen_subcommand_from search' -l json -d 'Print the results as JSON'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from search' -l refresh -d 'Update the copy first'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from search' -l max-age -x -d 'Update the copy first if older than this'
+complete -c godspeed-cli -n '__fish_seen_subcommand_from search' -l color -x -a 'auto always never' -d 'When to colour overdue tasks'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from completions' -a 'bash fish zsh'
 complete -c godspeed-cli -n '__fish_seen_subcommand_from add search' -a '(__godspeed_cli_names)'
 "##;
@@ -414,7 +423,7 @@ mod tests {
                 assert!(script.contains(needle), "{shell} script lacks {needle}");
             }
             // Fish declares a long option as `-l json`; the others spell it out.
-            for flag in ["json", "full", "include-completed", "refresh", "max-age"] {
+            for flag in ["json", "full", "include-completed", "refresh", "max-age", "color"] {
                 let spelled = if shell == "fish" { format!("-l {flag}") } else { format!("--{flag}") };
                 assert!(script.contains(&spelled), "{shell} script lacks {spelled}");
             }

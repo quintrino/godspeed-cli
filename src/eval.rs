@@ -225,6 +225,31 @@ impl Context {
         }
     }
 
+    /// Whether the task is overdue: it isn't completed, and its effective due date (the later of
+    /// the due date and any snooze, as for `due`) has passed. A date with no time is overdue from
+    /// the day after, so a task due today isn't; a date with a time is overdue once that time has
+    /// passed. A task that is snoozed past its due date is not overdue until the snooze ends.
+    pub fn is_overdue(&self, task: &StoredTask) -> bool {
+        if task.complete {
+            return false;
+        }
+        let keys = [
+            ("snoozed_until", false),
+            ("timeless_snoozed_until", true),
+            ("due_at", false),
+            ("timeless_due_at", true),
+        ];
+        let effective = keys
+            .iter()
+            .filter_map(|(key, timeless)| Some((moment(&task.json, key)?, *timeless)))
+            .max_by_key(|(moment, _)| *moment);
+        match effective {
+            Some((moment, true)) => moment.date() < self.now.date(),
+            Some((moment, false)) => moment < self.now,
+            None => false,
+        }
+    }
+
     pub fn number(&self, task: &Value, field: NumField) -> Option<i64> {
         let key = match field {
             NumField::Duration => "duration_minutes",
@@ -373,6 +398,57 @@ mod tests {
             "attachments": [{"name": "Budget.PDF"}],
             "created_at": "2026-10-01T12:00:00Z",
         }))
+    }
+
+    #[test]
+    fn a_task_is_overdue_from_the_day_after_a_date_with_no_time() {
+        let ctx = context();
+        let overdue = |due: &str| ctx.is_overdue(&task(json!({"id": "o", "title": "x", "timeless_due_at": due})));
+        assert!(overdue("2026-10-14"), "yesterday");
+        assert!(overdue("2020-01-01"));
+        assert!(!overdue("2026-10-15"), "due today is not overdue yet");
+        assert!(!overdue("2026-10-16"));
+        assert!(!overdue("2099-01-01"));
+    }
+
+    #[test]
+    fn a_task_with_a_due_time_is_overdue_once_that_time_has_passed() {
+        let ctx = context();
+        let overdue = |due: &str| ctx.is_overdue(&task(json!({"id": "o", "title": "x", "due_at": due})));
+        assert!(overdue("2020-01-01T12:00:00Z"));
+        assert!(!overdue("2099-01-01T12:00:00Z"));
+    }
+
+    #[test]
+    fn a_task_with_no_due_date_or_that_is_completed_is_never_overdue() {
+        let ctx = context();
+        assert!(!ctx.is_overdue(&task(json!({"id": "n", "title": "undated"}))));
+        let done = StoredTask { json: json!({"id": "d", "title": "x", "timeless_due_at": "2020-01-01"}), complete: true };
+        assert!(!ctx.is_overdue(&done), "a completed task is not overdue however old its due date");
+    }
+
+    #[test]
+    fn a_snooze_delays_when_a_task_becomes_overdue() {
+        let ctx = context();
+        let snoozed_ahead = task(json!({"id": "s", "title": "x", "timeless_due_at": "2020-01-01", "timeless_snoozed_until": "2099-01-01"}));
+        assert!(!ctx.is_overdue(&snoozed_ahead), "due long ago but snoozed until later");
+        let snooze_ended = task(json!({"id": "s", "title": "x", "timeless_due_at": "2099-01-01", "timeless_snoozed_until": "2020-01-01"}));
+        assert!(!ctx.is_overdue(&snooze_ended), "the later of the two counts, and that is the future due date");
+        let both_past = task(json!({"id": "s", "title": "x", "timeless_due_at": "2020-01-01", "snoozed_until": "2021-01-01T12:00:00Z"}));
+        assert!(ctx.is_overdue(&both_past));
+    }
+
+    #[test]
+    fn overdue_agrees_with_the_due_search_operator() {
+        let ctx = context();
+        for due in ["2020-01-01", "2026-10-14", "2026-10-15", "2026-10-16", "2099-01-01"] {
+            let t = task(json!({"id": "x", "title": "x", "timeless_due_at": due}));
+            let before_today = {
+                let q = parse(&["due<today".to_string()], now()).unwrap();
+                ctx.matches(&q.expr, &t)
+            };
+            assert_eq!(ctx.is_overdue(&t), before_today, "{due}");
+        }
     }
 
     #[test]

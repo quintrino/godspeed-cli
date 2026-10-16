@@ -238,8 +238,20 @@ fn format_line(cells: &[String; 4]) -> String {
     line.join("  ").trim_end().to_string()
 }
 
-fn table_rows(tasks: &[&StoredTask], ctx: &Context) -> Vec<String> {
-    tasks.iter().map(|task| format_line(&row_cells(task, ctx))).collect()
+/// ANSI escape codes for red text and for going back to normal.
+const RED: &str = "\x1b[31m";
+const RESET: &str = "\x1b[0m";
+
+/// The rows of the table. With `color`, an overdue task's whole row is red. The codes go round
+/// the finished row, after the columns are padded, so they can't change how the columns line up.
+fn table_rows(tasks: &[&StoredTask], ctx: &Context, color: bool) -> Vec<String> {
+    tasks
+        .iter()
+        .map(|task| {
+            let line = format_line(&row_cells(task, ctx));
+            if color && ctx.is_overdue(task) { format!("{RED}{line}{RESET}") } else { line }
+        })
+        .collect()
 }
 
 fn task_json(task: &StoredTask, ctx: &Context) -> Value {
@@ -270,7 +282,9 @@ fn limit_groups(groups: &mut Vec<Group<'_>>, limit: usize) {
 /// `limit:` counts tasks in the order they are shown. With `group:` that means the first groups
 /// are kept, so a group listed first (`group:label:Eternal|...`) is never cut to make room for a
 /// later one, however the tasks inside it sort.
-pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: bool) -> String {
+///
+/// With `color`, overdue tasks are shown in red in the table. JSON is never coloured.
+pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: bool, color: bool) -> String {
     sort_tasks(&mut tasks, &query.sorts, ctx);
 
     let mut groups = query.group.as_ref().map(|spec| group_tasks(&tasks, spec, query.duplicates, ctx));
@@ -298,7 +312,7 @@ pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: b
             .iter()
             .map(|g| {
                 let mut lines = vec![format!("{} ({})", g.name, g.tasks.len())];
-                lines.extend(table_rows(&g.tasks, ctx));
+                lines.extend(table_rows(&g.tasks, ctx, color));
                 lines.join("\n")
             })
             .collect::<Vec<_>>()
@@ -307,7 +321,7 @@ pub fn render(query: &Query, mut tasks: Vec<&StoredTask>, ctx: &Context, json: b
         None => {
             let header = format_line(&["TITLE", "LIST", "DUE", "LABELS"].map(String::from));
             let mut lines = vec![header];
-            lines.extend(table_rows(&tasks, ctx));
+            lines.extend(table_rows(&tasks, ctx, color));
             lines.join("\n")
         }
     }
@@ -362,11 +376,11 @@ mod tests {
     }
 
     fn run(text: &str, tasks: &[StoredTask]) -> String {
-        render(&query(text), tasks.iter().collect(), &context(), false)
+        render(&query(text), tasks.iter().collect(), &context(), false, false)
     }
 
     fn json_ids(text: &str, tasks: &[StoredTask]) -> Vec<String> {
-        let out = render(&query(text), tasks.iter().collect(), &context(), true);
+        let out = render(&query(text), tasks.iter().collect(), &context(), true, false);
         let parsed: Value = serde_json::from_str(&out).unwrap();
         parsed.as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap().to_string()).collect()
     }
@@ -534,7 +548,7 @@ mod tests {
             now(),
         );
         let t = [task("1", json!({"list_id": "a"})), task("2", json!({"list_id": "b"}))];
-        let out = render(&query("group:list:Morning|\"After lunch\""), t.iter().collect(), &lists, false);
+        let out = render(&query("group:list:Morning|\"After lunch\""), t.iter().collect(), &lists, false, false);
         assert_eq!(headings(&out), vec!["Morning (1)", "After lunch (1)"]);
     }
 
@@ -686,7 +700,7 @@ mod tests {
     }
 
     fn json_groups(text: &str, tasks: &[StoredTask]) -> Vec<(String, usize)> {
-        let out = render(&query(text), tasks.iter().collect(), &context(), true);
+        let out = render(&query(text), tasks.iter().collect(), &context(), true, false);
         let parsed: Value = serde_json::from_str(&out).unwrap();
         parsed
             .as_array()
@@ -703,6 +717,114 @@ mod tests {
         let out = run("group:label:High|Low enable:duplicates limit:2", &tasks);
 
         assert_eq!(headings(&out), vec!["High (1)", "Low (1)"], "the same task shown twice uses two places: {out}");
+    }
+
+    fn dated(id: &str, due: Option<&str>, complete: bool) -> StoredTask {
+        let mut t = task(id, json!({}));
+        if let Some(due) = due {
+            t.json["timeless_due_at"] = json!(due);
+        }
+        t.complete = complete;
+        t
+    }
+
+    /// The same text without the colour codes.
+    fn uncoloured(text: &str) -> String {
+        text.replace(RED, "").replace(RESET, "")
+    }
+
+    fn coloured_run(text: &str, tasks: &[StoredTask]) -> String {
+        render(&query(text), tasks.iter().collect(), &context(), false, true)
+    }
+
+    #[test]
+    fn overdue_tasks_are_shown_in_red_and_nothing_else_is() {
+        let tasks = [
+            dated("overdue", Some("2020-01-01"), false),
+            dated("yesterday", Some("2026-10-14"), false),
+            dated("today", Some("2026-10-15"), false),
+            dated("future", Some("2099-01-01"), false),
+            dated("undated", None, false),
+        ];
+
+        let out = coloured_run("", &tasks);
+
+        for line in out.lines() {
+            let red = line.starts_with(RED) && line.ends_with(RESET);
+            let overdue = line.starts_with(&format!("{RED}Task overdue")) || line.starts_with(&format!("{RED}Task yesterday"));
+            assert_eq!(red, overdue, "{line:?}");
+            if !red {
+                assert!(!line.contains('\x1b'), "{line:?}");
+            }
+        }
+        assert_eq!(out.matches(RED).count(), 2, "only the two overdue rows: {out}");
+        assert!(out.lines().next().unwrap().starts_with("TITLE"), "the header is plain");
+    }
+
+    #[test]
+    fn colour_never_changes_the_text_or_the_alignment() {
+        let tasks = [
+            dated("overdue", Some("2020-01-01"), false),
+            dated("future", Some("2099-01-01"), false),
+            task("long", json!({"title": "x".repeat(100), "timeless_due_at": "2020-01-01", "list_id": "l-work"})),
+        ];
+
+        assert_eq!(uncoloured(&coloured_run("", &tasks)), run("", &tasks));
+        assert_eq!(uncoloured(&coloured_run("group:list sort:due", &tasks)), run("group:list sort:due", &tasks));
+    }
+
+    #[test]
+    fn without_colour_there_are_no_escape_codes() {
+        let tasks = [dated("overdue", Some("2020-01-01"), false)];
+        assert!(!run("", &tasks).contains('\x1b'));
+        assert!(!run("group:list", &tasks).contains('\x1b'));
+    }
+
+    #[test]
+    fn completed_tasks_are_never_red_however_old_their_due_date() {
+        let tasks = [dated("done", Some("2020-01-01"), true), dated("open", Some("2020-01-01"), false)];
+
+        let out = render(&query("is:complete | !is:complete"), tasks.iter().collect(), &context(), false, true);
+
+        let done = out.lines().find(|l| l.contains("Task done")).unwrap();
+        let open = out.lines().find(|l| l.contains("Task open")).unwrap();
+        assert!(!done.contains('\x1b'), "{done:?}");
+        assert!(open.starts_with(RED), "{open:?}");
+    }
+
+    #[test]
+    fn grouped_output_colours_the_rows_but_not_the_headings() {
+        let tasks = [
+            task("a", json!({"list_id": "l-work", "timeless_due_at": "2020-01-01"})),
+            task("b", json!({"list_id": "l-work", "timeless_due_at": "2099-01-01"})),
+            task("c", json!({"list_id": "l-home", "timeless_due_at": "2020-01-01"})),
+        ];
+
+        let out = coloured_run("group:list", &tasks);
+
+        assert_eq!(headings(&out), vec!["Home (1)", "Work (2)"], "headings stay plain: {out}");
+        assert_eq!(out.matches(RED).count(), 2);
+        assert!(out.lines().filter(|l| l.contains("Task b")).all(|l| !l.contains('\x1b')));
+    }
+
+    #[test]
+    fn json_is_never_coloured() {
+        let tasks = [dated("overdue", Some("2020-01-01"), false)];
+
+        let out = render(&query(""), tasks.iter().collect(), &context(), true, true);
+
+        assert!(!out.contains('\x1b'));
+        assert!(serde_json::from_str::<Value>(&out).is_ok());
+    }
+
+    #[test]
+    fn a_snoozed_task_is_not_red_until_the_snooze_ends() {
+        let mut snoozed = task("snoozed", json!({"timeless_due_at": "2020-01-01"}));
+        snoozed.json["timeless_snoozed_until"] = json!("2099-01-01");
+
+        let out = coloured_run("", &[snoozed]);
+
+        assert!(!out.contains('\x1b'), "{out}");
     }
 
     #[test]
@@ -742,7 +864,7 @@ mod tests {
         assert_eq!(line.chars().nth(80), Some(' '));
         let ctx = Context::new(&[json!({"id": "l", "name": "A very long list name"})], &[], now());
         let t = task("2", json!({"list_id": "l"}));
-        let rendered = render(&query(""), vec![&t], &ctx, false);
+        let rendered = render(&query(""), vec![&t], &ctx, false, false);
         assert!(rendered.lines().nth(1).unwrap().contains("A very long…"), "{rendered}");
     }
 
@@ -758,13 +880,13 @@ mod tests {
     #[test]
     fn no_results_print_nothing_for_the_table_but_an_empty_array_for_json() {
         assert_eq!(run("", &[]), "");
-        assert_eq!(render(&query(""), vec![], &context(), true), "[]");
+        assert_eq!(render(&query(""), vec![], &context(), true, false), "[]");
     }
 
     #[test]
     fn json_keeps_the_full_task_and_adds_list_and_label_names() {
         let tasks = [task("1", json!({"title": "A very long title ".repeat(10), "list_id": "l-work", "label_ids": ["x-low"], "extra": {"k": 1}}))];
-        let out = render(&query(""), tasks.iter().collect(), &context(), true);
+        let out = render(&query(""), tasks.iter().collect(), &context(), true, false);
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed[0]["id"], "1");
         assert_eq!(parsed[0]["extra"], json!({"k": 1}));
@@ -776,7 +898,7 @@ mod tests {
     #[test]
     fn grouped_json_is_an_array_of_groups() {
         let tasks = [task("a", json!({"list_id": "l-work"})), task("b", json!({}))];
-        let out = render(&query("group:list"), tasks.iter().collect(), &context(), true);
+        let out = render(&query("group:list"), tasks.iter().collect(), &context(), true, false);
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed[0]["group"], "Work");
         assert_eq!(parsed[0]["tasks"][0]["id"], "a");

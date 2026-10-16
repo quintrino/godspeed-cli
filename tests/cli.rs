@@ -2215,7 +2215,7 @@ fn bash_completes_commands_flags_and_shell_names() {
         vec!["--full", "--include-completed", "--json"]
     );
     assert_eq!(bash_complete(&sandbox, "godspeed-cli refresh --i", &["godspeed-cli", "refresh", "--i"]), vec!["--include-completed"]);
-    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --", &["godspeed-cli", "search", "--"]), vec!["--json", "--refresh", "--max-age"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --", &["godspeed-cli", "search", "--"]), vec!["--json", "--refresh", "--max-age", "--color"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli search --m", &["godspeed-cli", "search", "--m"]), vec!["--max-age"]);
     assert_eq!(bash_complete(&sandbox, "godspeed-cli add --", &["godspeed-cli", "add", "--"]), vec!["--json"]);
     assert!(bash_complete(&sandbox, "godspeed-cli add --r", &["godspeed-cli", "add", "--r"]).is_empty());
@@ -2480,4 +2480,145 @@ fn the_negations_after_the_or_only_apply_to_the_right_hand_side() {
     let ids: Vec<&str> = tasks.as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
     assert!(ids.contains(&"e1") && ids.contains(&"e4"));
     assert!(!ids.contains(&"e2") && !ids.contains(&"e3"), "with parentheses the negations apply to everything: {ids:?}");
+}
+
+// ---- overdue tasks in colour ----
+
+const RED: &str = "\x1b[31m";
+const RESET: &str = "\x1b[0m";
+
+/// A copy with an overdue task, a task due far ahead, an undated one and an overdue one that is
+/// snoozed until much later.
+fn overdue_copy(name: &str) -> Sandbox {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new(name);
+    api.queue_page_with(
+        vec![
+            json!({"id": "late", "title": "Overdue task", "timeless_due_at": "2020-01-01", "updated_at": "2026-03-04T00:00:00Z"}),
+            json!({"id": "soon", "title": "Future task", "timeless_due_at": "2099-01-01", "updated_at": "2026-03-03T00:00:00Z"}),
+            json!({"id": "none", "title": "Undated task", "updated_at": "2026-03-02T00:00:00Z"}),
+            json!({"id": "snoozed", "title": "Snoozed task", "timeless_due_at": "2020-01-01",
+                   "timeless_snoozed_until": "2099-01-01", "updated_at": "2026-03-01T00:00:00Z"}),
+        ],
+        search_lists(),
+        search_labels(),
+    );
+    let output = sandbox.run(&api, &["refresh"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    sandbox
+}
+
+#[test]
+fn overdue_tasks_are_red_with_color_always_and_nothing_else_is() {
+    let sandbox = overdue_copy("color-always");
+
+    let output = search(&sandbox, &["--color", "always"]);
+
+    let text = stdout(&output);
+    let red_rows: Vec<&str> = text.lines().filter(|l| l.starts_with(RED)).collect();
+    assert_eq!(red_rows.len(), 1, "{text:?}");
+    assert!(red_rows[0].contains("Overdue task") && red_rows[0].ends_with(RESET), "{:?}", red_rows[0]);
+    for plain in ["Future task", "Undated task", "Snoozed task"] {
+        let line = text.lines().find(|l| l.contains(plain)).unwrap();
+        assert!(!line.contains('\x1b'), "{plain}: {line:?}");
+    }
+    assert!(!text.lines().next().unwrap().contains('\x1b'), "the header is plain");
+}
+
+#[test]
+fn output_that_is_not_a_terminal_has_no_colour_by_default() {
+    let sandbox = overdue_copy("color-pipe");
+
+    let default = search(&sandbox, &[]);
+    let auto = search(&sandbox, &["--color=auto"]);
+    let never = search(&sandbox, &["--color", "never"]);
+
+    for output in [default, auto, never] {
+        assert!(!stdout(&output).contains('\x1b'), "{:?}", stdout(&output));
+        assert!(stdout(&output).contains("Overdue task"));
+    }
+}
+
+#[test]
+fn colour_only_adds_the_codes_and_never_changes_the_text() {
+    let sandbox = overdue_copy("color-same-text");
+
+    let coloured = stdout(&search(&sandbox, &["--color=always"]));
+    let plain = stdout(&search(&sandbox, &["--color=never"]));
+
+    assert_eq!(coloured.replace(RED, "").replace(RESET, ""), plain);
+}
+
+#[test]
+fn an_explicit_color_flag_beats_no_color() {
+    let sandbox = overdue_copy("color-no-color");
+    let run = |args: &[&str]| sandbox.run_with_env(None, None, args, None, &[("NO_COLOR", "1")]);
+
+    let always = run(&["search", "--color", "always"]);
+    let auto = run(&["search"]);
+
+    assert!(stdout(&always).contains(RED), "--color always wins over NO_COLOR");
+    assert!(!stdout(&auto).contains('\x1b'));
+}
+
+#[test]
+fn json_is_never_coloured_even_with_color_always() {
+    let sandbox = overdue_copy("color-json");
+
+    let output = search(&sandbox, &["--json", "--color", "always"]);
+
+    assert!(!stdout(&output).contains('\x1b'));
+    let parsed: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(parsed.as_array().unwrap().len(), 4);
+}
+
+#[test]
+fn grouped_output_colours_overdue_rows_but_not_the_group_headings() {
+    let sandbox = overdue_copy("color-grouped");
+
+    let output = search(&sandbox, &["group:due", "--color=always"]);
+
+    let text = stdout(&output);
+    for heading in text.lines().filter(|l| l.ends_with(')') && !l.starts_with(' ') && !l.contains("task")) {
+        assert!(!heading.contains('\x1b'), "{heading:?}");
+    }
+    assert_eq!(text.matches(RED).count(), 1, "{text:?}");
+}
+
+#[test]
+fn a_bad_or_missing_color_value_is_a_usage_error() {
+    let sandbox = overdue_copy("color-bad");
+
+    let bad = search(&sandbox, &["--color", "red"]);
+    let missing = search(&sandbox, &["--color"]);
+
+    assert_eq!(code(&bad), 2);
+    assert!(stderr(&bad).contains("'red' isn't auto, always or never"), "{}", stderr(&bad));
+    assert_eq!(code(&missing), 2);
+    assert!(stdout(&bad).is_empty() && stdout(&missing).is_empty());
+}
+
+#[test]
+fn search_help_describes_the_colour() {
+    let sandbox = Sandbox::new("color-help");
+
+    let output = search(&sandbox, &["--help"]);
+
+    let text = stdout(&output);
+    assert!(text.contains("--color WHEN"), "{text}");
+    assert!(text.contains("NO_COLOR"), "{text}");
+    assert!(text.contains("overdue"), "{text}");
+}
+
+#[test]
+fn bash_completes_the_color_flag_and_its_values() {
+    needs_bash!();
+    let (sandbox, _api) = sample_copy("bash-color");
+    let g = "godspeed-cli";
+
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --c", &[g, "search", "--c"]), vec!["--color"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --color ", &[g, "search", "--color", ""]), vec!["auto", "always", "never"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --color a", &[g, "search", "--color", "a"]), vec!["auto", "always"]);
+    assert_eq!(bash_complete(&sandbox, "godspeed-cli search --color n", &[g, "search", "--color", "n"]), vec!["never"]);
+    assert!(bash_complete(&sandbox, "godspeed-cli add --c", &[g, "add", "--c"]).is_empty(), "add has no --color");
 }

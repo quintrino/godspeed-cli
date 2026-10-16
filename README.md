@@ -372,6 +372,27 @@ The default output is a table with a header row. Titles are cut to 80 characters
 
 If the local copy is a day or more old, a note says so on stderr.
 
+### Colour
+
+In a terminal, **overdue tasks are shown in red**: the whole row of the table, so they stand out in a long list. Nothing else is coloured: not the header, the group headings, or tasks that aren't overdue.
+
+A task is overdue when its effective due date has passed. That is the later of its due date and its snooze date, the same as `due` in a search. So:
+
+- a date with no time is overdue from the day after (a task due today is not overdue yet);
+- a date with a time is overdue once that time has passed;
+- a task snoozed past its due date is not overdue until the snooze ends;
+- a task with no due date, and a completed task, is never overdue.
+
+`due<today` finds the same tasks (for dates without a time), so a search can list exactly the red ones.
+
+| `--color WHEN` | Meaning |
+| --- | --- |
+| `auto` (the default) | Colour only when output goes to a terminal. Not if the `NO_COLOR` environment variable is set to anything non-empty (see [no-color.org](https://no-color.org)), and not on a `dumb` terminal |
+| `always` | Always colour, even into a pipe or a file, and even if `NO_COLOR` is set. Use it with a pager: `godspeed-cli search 'due<=today' --color always \| less -R` |
+| `never` | Never colour |
+
+JSON (`--json`) is never coloured. The colour is added around each finished row, so the text and the columns are exactly the same with or without it.
+
 ### What differs from Godspeed itself
 
 - It searches a copy, so results are only as fresh as the last `refresh`.
@@ -398,7 +419,7 @@ Search reads these fields from each task's JSON: `title`, `notes`, `attachments`
 Open a new shell, and Tab completes:
 
 - the commands (`add`, `refresh`, `search`, `completions`), `--help` and `--version`;
-- each command's flags: `--json`, `--full`, `--include-completed`, `--refresh`, `--max-age`;
+- each command's flags: `--json`, `--full`, `--include-completed`, `--refresh`, `--max-age`, `--color` (and its values `auto`, `always`, `never`);
 - the shell names after `completions`;
 - **in `add`, the names of your lists after `@` and your labels after `.`**: `godspeed-cli add "Buy milk @Wo<Tab>` becomes `@WorkProjects`;
 - **in `search`, list names after `list:` and `in:`, and label names after `label:`**, including after `!`, `-` and `(`.
