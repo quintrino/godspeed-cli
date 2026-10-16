@@ -33,6 +33,8 @@ enum Invocation {
     AddJson(Vec<String>),
     Refresh(Vec<String>),
     Search(Vec<String>),
+    AddHelp,
+    RefreshHelp,
     SearchHelp,
     Completions(Vec<String>),
     CompletionsHelp,
@@ -58,7 +60,7 @@ fn parse_invocation(args: &[String]) -> Invocation {
         "-h" | "--help" => Invocation::Help,
         "-V" | "--version" => Invocation::Version,
         "add" => match rest.first().map(String::as_str) {
-            Some("-h" | "--help") => Invocation::Help,
+            Some("-h" | "--help") => Invocation::AddHelp,
             Some("-V" | "--version") => Invocation::Version,
             Some("--json") => match rest.get(1).map(String::as_str) {
                 Some("--") => Invocation::AddJson(rest[2..].to_vec()),
@@ -68,7 +70,7 @@ fn parse_invocation(args: &[String]) -> Invocation {
             _ => Invocation::Add(rest.to_vec()),
         },
         "refresh" => match rest.first().map(String::as_str) {
-            Some("-h" | "--help") => Invocation::Help,
+            Some("-h" | "--help") => Invocation::RefreshHelp,
             _ => Invocation::Refresh(rest.to_vec()),
         },
         "search" => match rest.first().map(String::as_str) {
@@ -99,11 +101,16 @@ fn problem_message(problem: &Problem) -> String {
     }
 }
 
+/// Prints a help page, laid out for the width of the terminal.
+fn print_help(page: &str) {
+    print!("godspeed-cli {}\n{}", env!("CARGO_PKG_VERSION"), help::render(page, help::terminal_width()));
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     match parse_invocation(&args) {
         Invocation::Help => {
-            print!("godspeed-cli {}\n{}", env!("CARGO_PKG_VERSION"), help::HELP);
+            print_help(help::HELP);
             exit::SUCCESS
         }
         Invocation::Version => {
@@ -114,13 +121,21 @@ fn main() -> ExitCode {
         Invocation::AddJson(task_args) => capture::run_add(&task_args, true),
         Invocation::Refresh(refresh_args) => refresh::run_refresh(&refresh_args),
         Invocation::Search(search_args) => search::run_search(&search_args),
+        Invocation::AddHelp => {
+            print_help(help::ADD_HELP);
+            exit::SUCCESS
+        }
+        Invocation::RefreshHelp => {
+            print_help(help::REFRESH_HELP);
+            exit::SUCCESS
+        }
         Invocation::SearchHelp => {
-            print!("godspeed-cli {}\n{}", env!("CARGO_PKG_VERSION"), help::SEARCH_HELP);
+            print_help(help::SEARCH_HELP);
             exit::SUCCESS
         }
         Invocation::Completions(completions_args) => completions::run_completions(&completions_args),
         Invocation::CompletionsHelp => {
-            print!("godspeed-cli {}\n{}", env!("CARGO_PKG_VERSION"), help::COMPLETIONS_HELP);
+            print_help(help::COMPLETIONS_HELP);
             exit::SUCCESS
         }
         Invocation::Names(names_args) => completions::run_names(&names_args),
@@ -218,7 +233,8 @@ mod tests {
 
     #[test]
     fn add_help_and_version() {
-        assert_eq!(parse_invocation(&args(&["add", "--help"])), Invocation::Help);
+        assert_eq!(parse_invocation(&args(&["add", "--help"])), Invocation::AddHelp);
+        assert_eq!(parse_invocation(&args(&["add", "-h"])), Invocation::AddHelp);
         assert_eq!(parse_invocation(&args(&["add", "-V"])), Invocation::Version);
     }
 
@@ -251,7 +267,8 @@ mod tests {
             parse_invocation(&args(&["refresh", "--include-completed", "--json"])),
             Invocation::Refresh(args(&["--include-completed", "--json"]))
         );
-        assert_eq!(parse_invocation(&args(&["refresh", "--help"])), Invocation::Help);
+        assert_eq!(parse_invocation(&args(&["refresh", "--help"])), Invocation::RefreshHelp);
+        assert_eq!(parse_invocation(&args(&["refresh", "-h"])), Invocation::RefreshHelp);
         assert_eq!(
             parse_invocation(&args(&["search", "label:Low", "due:today"])),
             Invocation::Search(args(&["label:Low", "due:today"]))
@@ -283,6 +300,8 @@ mod tests {
         assert!(!help::HELP.contains("__complete"));
         assert!(!help::SEARCH_HELP.contains("__complete"));
         assert!(!help::COMPLETIONS_HELP.contains("__complete"));
+        assert!(!help::ADD_HELP.contains("__complete"));
+        assert!(!help::REFRESH_HELP.contains("__complete"));
     }
 
     #[test]

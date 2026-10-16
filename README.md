@@ -93,10 +93,24 @@ godspeed-cli add --json "Pay rent @Home" | jq -r '.todo_item.id'
 
 | Option | |
 | --- | --- |
-| `-h`, `--help` | Print the usage and task syntax, then exit. `search --help` and `completions --help` print their own. |
+| `-h`, `--help` | Print the usage and the settings, then exit. After a command, print that command's own help (see [Getting help](#getting-help)). |
 | `-V`, `--version` | Print the version, then exit. |
 
 These are only recognised as the first argument (or straight after `add`), so `godspeed-cli add "fix the --version bug"` still creates a task. `--help` and `--version` don't need `GODSPEED_TOKEN` and never create a task.
+
+### Getting help
+
+Every command has its own help page, and each explains just that command:
+
+```bash
+godspeed-cli --help               # the overview, the settings file and the exit status
+godspeed-cli add --help           # the task syntax and how lists and labels are matched
+godspeed-cli refresh --help       # incremental and full refreshes
+godspeed-cli search --help        # the query syntax
+godspeed-cli completions --help   # installing tab completion
+```
+
+The help is laid out to fit your terminal: it uses the width of the window, so it re-wraps if you resize it, and `godspeed-cli --help | less` still uses the width of the terminal it is shown in. When the width can't be found (for instance when the output goes to a file) it uses the `COLUMNS` environment variable if that holds a number, and otherwise 80 columns. It is never narrower than 40 columns. Examples and usage lines are never wrapped.
 
 ### Exit status
 
@@ -111,7 +125,7 @@ Use this in scripts: `godspeed-cli add "..." || echo "not created"`.
 ## Special Syntax
 
 ### Labels with `.`
-Add hashtags anywhere in your task to create labels. They'll be removed from the task title and added as labels (title-cased).
+Put `.label` words anywhere in your task to add labels. They are removed from the title and matched against your Godspeed labels (see [How lists and labels are matched](#how-lists-and-labels-are-matched)); a label that doesn't exist is left out. A word that starts with a dot is always a label, so `.gitignore` is the label "gitignore".
 
 #NOTE: Because of Shell limitations, this only works with single word labels
 
@@ -122,7 +136,7 @@ godspeed-cli add "Review pull request .Urgent .Work"
 ```
 
 ### Lists with `@`
-Specify which list to add the task to using `@ListName`. The list name will be matched case-insensitively against your Godspeed lists, trying an exact match first, then a prefix, then any part of the name, then any part of the name ignoring spaces, slashes and dashes (so `@sideproj` finds "Side Projects"). If several lists match at the same level, the shortest name wins.
+Specify which list to add the task to using `@ListName`. The name is matched against your Godspeed lists as described in [How lists and labels are matched](#how-lists-and-labels-are-matched); if no list matches, the task is still created, without one.
 
 #NOTE: Because of Shell limitations, this only works with single word lists
 
@@ -134,6 +148,34 @@ godspeed-cli add "Call dentist @Personal"
 **Note**: Only one list can be specified per task. If more than one `@list` is found, the task is rejected with an error (exit status 2) and nothing is sent or queued. `@` words after `n:` are part of the notes and don't count.
 
 A task needs a title: one made only of `.label`, `@list`, `~duration` and `:date` words is rejected the same way.
+
+### How lists and labels are matched
+
+Names are matched ignoring case, against your lists and labels as last seen. They are kept in `lists.toml` and `labels.toml` in the data directory, and fetched from Godspeed again, once, when a name isn't found.
+
+**`@list`** tries these in turn and uses the first that finds a list:
+
+| Step | Finds | Example |
+| --- | --- | --- |
+| exact | the whole name | `@work` finds "Work" |
+| prefix | a name that starts with it | `@wo` finds "Work" |
+| contains | a name that contains it | `@ork` finds "Work" |
+| no spaces | part of the name, once spaces, slashes and dashes are left out of both | `@workprojects`, `@work-proj` and `@kproj` find "Work Projects" |
+
+If several names are found at the same step, the shortest wins, then the first alphabetically. So with lists "Work", "Work Projects" and "Homework", `@work` is "Work" (exact), `@wo` is "Work" (the shortest prefix), and `@mew` is "Homework" (the only one that contains it).
+
+**`.label`** is stricter: the exact name, then a prefix, then the *whole* name with spaces, slashes and dashes left out (`.workprojects` finds "Work Projects"). It never matches part of a name, so `.work` doesn't pick "Homework". Labels are matched one by one, and the ones that aren't found are left out of the task.
+
+If nothing matches, the task is still created, without that list or label. A task with more than one `@list`, or with no title, is rejected (exit status 2) and isn't queued.
+
+The words that make up the rest of the syntax:
+
+- Any other word is part of the title, which is the words joined by single spaces.
+- `~45`, `~45m` and `~1.5h` set the duration. It has to be more than zero after rounding to whole minutes, otherwise the word stays in the title. If a duration or a date is given twice, the last one wins.
+- `:today`, `:tomorrow`, `:next-week`, `:YYYYMMDD` and `:YYYY-MM-DD` set the due date. A short number after a colon, like `:45`, is a duration in minutes (the older syntax). Something that looks like syntax but isn't, such as `~roughly`, `:someday` or `:20261345`, stays in the title.
+- `n:` starts the notes, but only with a space before it: `Buy milk n: oat` has notes, `Buy milkn: oat` doesn't. Everything after the first ` n:` is notes and is never read as syntax.
+
+`godspeed-cli add --help` explains all of this too.
 
 ### Duration with `~`
 Set the task duration with `~` followed by a number, in minutes (`~45`, `~45m`) or hours (`~2h`, `~1.5h`). Fractions are rounded to whole minutes.

@@ -211,6 +211,15 @@ impl Sandbox {
         connection.query_row("SELECT COUNT(*) FROM tasks WHERE is_complete = 1", [], |row| row.get(0)).unwrap()
     }
 
+    /// Pre-fills the cached names of lists or labels (`lists.toml`, `labels.toml`), as earlier
+    /// runs would have left them, so a task can be matched against known names without a fetch.
+    fn write_names(&self, file: &str, names: &[(&str, &str)]) {
+        let path = self.data_home.join("godspeed-cli").join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text: String = names.iter().map(|(name, id)| format!("\"{name}\" = \"{id}\"\n")).collect();
+        fs::write(path, text).unwrap();
+    }
+
     /// Pre-fills the retry queue, as an earlier failed run would have.
     fn write_queue(&self, tasks: &[&str]) {
         let path = self.cache_file();
@@ -265,6 +274,9 @@ impl Sandbox {
             // With no PATH at all the system default is searched, which on macOS would find
             // osascript and show real notifications while the tests run.
             .env("PATH", "/nonexistent")
+            // Wide, so that phrases in the help text are not split across lines. Tests of the width
+            // itself set COLUMNS (an empty one means "unusable", which gives the default of 80).
+            .env("COLUMNS", "1000")
             .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -2008,7 +2020,8 @@ fn the_help_describes_add_as_the_only_way_to_create_a_task() {
     assert!(text.contains("godspeed-cli add [--json] [--] <TASK>..."), "{text}");
     assert!(text.contains("echo \"<TASK>\" | godspeed-cli add"), "{text}");
     assert!(text.contains("There are no other commands"), "{text}");
-    assert!(!text.contains("default"), "add is no longer a default: {text}");
+    assert!(!text.contains("so `add` can be left out"), "add is no longer the default command: {text}");
+    assert!(!text.contains("is the default"), "{text}");
     assert!(text.contains("completions"), "{text}");
 }
 
@@ -2865,4 +2878,288 @@ fn search_help_says_the_list_is_yellow() {
     let text = stdout(&search(&sandbox, &["--help"]));
 
     assert!(text.contains("yellow"), "{text}");
+}
+
+// ---- the help pages and their width ----
+
+/// The longest line of `text`, in characters, not counting examples and other lines that are
+/// allowed to run on (verbatim lines and single words).
+fn longest_ordinary_line(text: &str) -> usize {
+    text.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("godspeed-cli") || t.starts_with("echo ") || t.contains(" = ") || !t.contains(' '))
+        })
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+/// A name no other test uses, so that tests running side by side never share a directory.
+fn unique_name(prefix: &str) -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    format!("{prefix}-{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+}
+
+fn help_at(columns: &str, args: &[&str]) -> String {
+    let sandbox = Sandbox::new(&unique_name("help-width"));
+    stdout(&sandbox.run_with_env(None, None, args, None, &[("COLUMNS", columns)]))
+}
+
+#[test]
+fn every_help_page_is_laid_out_in_80_columns_by_default() {
+    for args in [&["--help"][..], &["add", "--help"], &["refresh", "--help"], &["search", "--help"], &["completions", "--help"]] {
+        // An empty COLUMNS is unusable, so this is what happens when it isn't set at all.
+        let text = help_at("", args);
+        assert!(longest_ordinary_line(&text) <= 80, "{args:?}: {}", longest_ordinary_line(&text));
+        assert!(longest_ordinary_line(&text) >= 60, "{args:?}: it does use the width, and isn't squeezed");
+    }
+}
+
+#[test]
+fn the_help_follows_the_width_it_is_given() {
+    for args in [&["--help"][..], &["add", "--help"], &["refresh", "--help"], &["search", "--help"]] {
+        let narrow = help_at("50", args);
+        let normal = help_at("80", args);
+        let wide = help_at("120", args);
+        assert!(longest_ordinary_line(&narrow) <= 50, "{args:?}: {}", longest_ordinary_line(&narrow));
+        assert!(longest_ordinary_line(&wide) <= 120 && longest_ordinary_line(&wide) > 80, "{args:?}: {}", longest_ordinary_line(&wide));
+        assert!(narrow.lines().count() > normal.lines().count() && normal.lines().count() > wide.lines().count(), "{args:?}");
+        // Only the layout changes, never the words.
+        let words = |t: &str| {
+            let mut w: Vec<String> = t.split_whitespace().map(str::to_string).collect();
+            w.sort();
+            w
+        };
+        assert_eq!(words(&narrow), words(&normal), "{args:?}");
+        assert_eq!(words(&normal), words(&wide), "{args:?}");
+    }
+}
+
+#[test]
+fn a_bad_or_tiny_columns_value_falls_back_sensibly() {
+    let default = help_at("", &["add", "--help"]);
+    assert_eq!(help_at("not-a-number", &["add", "--help"]), default);
+    assert_eq!(help_at("0", &["add", "--help"]), default);
+    assert_eq!(help_at("-3", &["add", "--help"]), default);
+    // Narrower than 40 is raised to 40.
+    let tiny = help_at("10", &["add", "--help"]);
+    assert_eq!(tiny, help_at("40", &["add", "--help"]));
+    assert!(longest_ordinary_line(&tiny) <= 40);
+}
+
+#[test]
+fn the_version_line_is_the_first_line_of_every_page_and_not_wrapped() {
+    for args in [&["--help"][..], &["add", "--help"], &["refresh", "--help"], &["search", "--help"], &["completions", "--help"]] {
+        let text = help_at("40", args);
+        assert_eq!(text.lines().next().unwrap(), format!("godspeed-cli {}", env!("CARGO_PKG_VERSION")), "{args:?}");
+    }
+}
+
+#[test]
+fn add_and_refresh_have_their_own_help_and_it_is_not_the_general_help() {
+    let general = help_at("1000", &["--help"]);
+    let add = help_at("1000", &["add", "--help"]);
+    let add_short = help_at("1000", &["add", "-h"]);
+    let refresh = help_at("1000", &["refresh", "--help"]);
+    let refresh_short = help_at("1000", &["refresh", "-h"]);
+
+    assert_ne!(add, general);
+    assert_ne!(refresh, general);
+    assert_ne!(add, refresh);
+    assert_eq!(add, add_short);
+    assert_eq!(refresh, refresh_short);
+    for needle in ["HOW LISTS AND LABELS ARE MATCHED:", "TASK SYNTAX:", "--json", "IF THE TASK CAN'T BE SENT:", "godspeed-cli add [--json] [--] <TASK>..."] {
+        assert!(add.contains(needle), "add --help lacks {needle}");
+    }
+    for needle in ["INCREMENTAL AND FULL:", "A REFRESH IS FULL WHEN:", "--full", "--include-completed", "cache.sqlite3", "godspeed-cli refresh [--full]"] {
+        assert!(refresh.contains(needle), "refresh --help lacks {needle}");
+    }
+    assert!(!add.contains("INCREMENTAL AND FULL") && !refresh.contains("HOW LISTS AND LABELS"));
+}
+
+#[test]
+fn the_per_command_help_needs_no_token_sends_nothing_and_creates_nothing() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("help-no-side-effects");
+
+    for args in [&["add", "--help"][..], &["refresh", "-h"], &["search", "--help"], &["completions", "--help"], &["--help"]] {
+        let output = sandbox.run_with(Some(&api.url), None, args, None);
+        assert_eq!(code(&output), 0, "{args:?}");
+        assert!(stderr(&output).is_empty(), "{args:?}: {}", stderr(&output));
+    }
+    assert!(api.requests().is_empty());
+    assert!(!sandbox.data_home.join("godspeed-cli").exists());
+}
+
+#[test]
+fn the_settings_are_explained_in_the_main_help_with_their_defaults() {
+    let text = help_at("1000", &["--help"]);
+
+    assert!(!text.contains("See the README"));
+    for needle in ["SETTINGS FILE:", "config.toml", "max_age", "include_completed", "full_refresh_after", "Default: \"7d\"", "Default: false"] {
+        assert!(text.contains(needle), "{needle}");
+    }
+    assert!(text.contains("COLUMNS") && text.contains("NO_COLOR") && text.contains("GODSPEED_TOKEN"));
+}
+
+// ---- the rules in `add --help`, checked against the program ----
+
+/// Runs `godspeed-cli add <task>` against a mock API, with the cached lists and labels given,
+/// and returns the task that was posted.
+fn posted_with_names(lists: &[(&str, &str)], labels: &[(&str, &str)], task: &str) -> Value {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new(&unique_name("matching"));
+    sandbox.write_names("lists.toml", lists);
+    sandbox.write_names("labels.toml", labels);
+    let output = sandbox.run(&api, &["add", task]);
+    assert_eq!(code(&output), 0, "{task}: {}", stderr(&output));
+    api.posted_tasks().remove(0)
+}
+
+fn list_of(task: &Value) -> Option<String> {
+    task.get("list_id").and_then(Value::as_str).map(str::to_string)
+}
+
+fn labels_of(task: &Value) -> Vec<String> {
+    task.get("label_ids")
+        .and_then(Value::as_array)
+        .map(|ids| ids.iter().map(|id| id.as_str().unwrap().to_string()).collect())
+        .unwrap_or_default()
+}
+
+const NAME_LISTS: [(&str, &str); 6] = [
+    ("work", "id-work"),
+    ("work projects", "id-wp"),
+    ("homework", "id-hw"),
+    ("home", "id-home"),
+    ("ba", "id-ba"),
+    ("bb", "id-bb"),
+];
+
+#[test]
+fn a_list_is_matched_by_the_exact_name_first() {
+    // "work" is also the start of "work projects" and part of "homework", but the exact name wins.
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @work")).as_deref(), Some("id-work"));
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @WORK")).as_deref(), Some("id-work"), "ignoring case");
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @home")).as_deref(), Some("id-home"));
+}
+
+#[test]
+fn a_list_is_matched_by_a_prefix_when_there_is_no_exact_name() {
+    // "wo" starts "work" and "work projects": the shortest, "work", wins.
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @wo")).as_deref(), Some("id-work"));
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @work-p")).as_deref(), Some("id-wp"), "not a prefix, but found by the last step");
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @hom")).as_deref(), Some("id-home"), "prefix of home only (homework starts with 'home' too): the shortest");
+}
+
+#[test]
+fn a_list_is_matched_by_a_part_of_its_name_when_no_prefix_fits() {
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @ork")).as_deref(), Some("id-work"), "in work, work projects and homework: the shortest");
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @mew")).as_deref(), Some("id-hw"), "only in homework");
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @proj")).as_deref(), Some("id-wp"));
+}
+
+#[test]
+fn a_list_is_matched_by_its_name_without_spaces_slashes_and_dashes() {
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @workprojects")).as_deref(), Some("id-wp"));
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @work-projects")).as_deref(), Some("id-wp"));
+    // Part of the name is enough, once the spaces are left out of both.
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @kproj")).as_deref(), Some("id-wp"));
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @work-proj")).as_deref(), Some("id-wp"));
+}
+
+#[test]
+fn among_lists_found_at_the_same_step_the_shortest_then_the_first_alphabetically_wins() {
+    // "ba" and "bb" are both prefixes of "b" and the same length: the first alphabetically.
+    assert_eq!(list_of(&posted_with_names(&NAME_LISTS, &[], "Task @b")).as_deref(), Some("id-ba"));
+}
+
+#[test]
+fn a_task_whose_list_is_not_found_is_still_created_without_one() {
+    let task = posted_with_names(&NAME_LISTS, &[], "Task @nothinglikethis");
+
+    assert_eq!(list_of(&task), None);
+    assert_eq!(task["title"], "Task");
+}
+
+const NAME_LABELS: [(&str, &str); 3] = [("work", "x-work"), ("homework", "x-hw"), ("work projects", "x-wp")];
+
+#[test]
+fn a_label_is_matched_by_the_exact_name_then_a_prefix_then_the_name_without_spaces() {
+    assert_eq!(labels_of(&posted_with_names(&[], &NAME_LABELS, "Task .work")), vec!["x-work"], "exact");
+    assert_eq!(labels_of(&posted_with_names(&[], &NAME_LABELS, "Task .WORK")), vec!["x-work"], "ignoring case");
+    assert_eq!(labels_of(&posted_with_names(&[], &NAME_LABELS, "Task .wo")), vec!["x-work"], "prefix, the shortest");
+    assert_eq!(labels_of(&posted_with_names(&[], &NAME_LABELS, "Task .workprojects")), vec!["x-wp"], "without spaces");
+    assert_eq!(labels_of(&posted_with_names(&[], &NAME_LABELS, "Task .homework")), vec!["x-hw"]);
+}
+
+#[test]
+fn a_label_is_never_matched_by_a_part_of_its_name_so_work_does_not_pick_homework() {
+    let only_homework = [("homework", "x-hw")];
+
+    assert!(labels_of(&posted_with_names(&[], &only_homework, "Task .work")).is_empty());
+    assert!(labels_of(&posted_with_names(&[], &only_homework, "Task .ork")).is_empty());
+    assert!(labels_of(&posted_with_names(&[], &only_homework, "Task .mew")).is_empty());
+}
+
+#[test]
+fn labels_are_matched_one_by_one_and_the_ones_not_found_are_left_out() {
+    // The names the mock API also has (so that fetching the labels again, which happens when one
+    // is not found, gives the same ones): Urgent and Writing.
+    let known = [("urgent", "label-urgent"), ("writing", "label-writing")];
+    let task = posted_with_names(&[], &known, "Task .urgent .nothinglikethis .writing");
+
+    assert_eq!(labels_of(&task), vec!["label-urgent", "label-writing"]);
+    assert_eq!(task["title"], "Task");
+}
+
+#[test]
+fn a_word_that_starts_with_a_dot_is_always_a_label_so_gitignore_is_the_label_gitignore() {
+    let task = posted_with_names(&[], &[("gitignore", "x-git")], "Fix .gitignore");
+
+    assert_eq!(labels_of(&task), vec!["x-git"]);
+    assert_eq!(task["title"], "Fix");
+}
+
+#[test]
+fn only_one_list_is_allowed_and_a_second_is_rejected_without_queueing() {
+    let api = MockApi::start(200);
+    let sandbox = Sandbox::new("matching-two-lists");
+    sandbox.write_names("lists.toml", &NAME_LISTS);
+
+    let output = sandbox.run(&api, &["add", "Task @work @home"]);
+
+    assert_eq!(code(&output), 2);
+    assert!(sandbox.queued_tasks().is_empty());
+    assert_eq!(api.count("POST", "/tasks"), 0);
+}
+
+#[test]
+fn a_duration_or_date_given_twice_uses_the_last() {
+    let task = posted_with_names(&[], &[], "Task ~10m ~20m :20261001 :20261002");
+
+    assert_eq!(task["duration_minutes"], 20);
+    assert_eq!(task["timeless_due_at"], "2026-10-02");
+}
+
+#[test]
+fn the_duration_forms_in_the_help_all_work_and_zero_stays_in_the_title() {
+    assert_eq!(posted_with_names(&[], &[], "T ~45")["duration_minutes"], 45);
+    assert_eq!(posted_with_names(&[], &[], "T ~45m")["duration_minutes"], 45);
+    assert_eq!(posted_with_names(&[], &[], "T ~1.5h")["duration_minutes"], 90);
+    assert_eq!(posted_with_names(&[], &[], "T ~0.4m")["title"], "T ~0.4m", "rounds to zero, so it is not a duration");
+    assert_eq!(posted_with_names(&[], &[], "T ~0")["title"], "T ~0");
+    assert_eq!(posted_with_names(&[], &[], "T :45")["duration_minutes"], 45, "the older syntax");
+}
+
+#[test]
+fn notes_start_at_the_first_n_colon_that_has_a_space_before_it() {
+    let notes = posted_with_names(&[], &[], "Buy milk n: ask about oat n: not another note @home");
+    assert_eq!(notes["title"], "Buy milk");
+    assert_eq!(notes["notes"], "ask about oat n: not another note @home");
+
+    let attached = posted_with_names(&[], &[], "Buy milkn: ask");
+    assert_eq!(attached["title"], "Buy milkn: ask", "no space before n: so it is not notes");
+    assert!(attached.get("notes").is_none());
 }
